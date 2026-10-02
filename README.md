@@ -1,64 +1,68 @@
 # 🌀 IPChakra
 
-Free, fast VPN app — **Free Mode** me unlimited fast VPN (WARP + VPNGate),
-**Chakra Mode** me rotating residential/mobile IP (trial phase me hai).
+A free, fast VPN app for Android, Android TV and Windows.
 
-## Free servers — 5 source, sab auto-update
+**Free Mode** gives you an unlimited free VPN (WARP, VPNGate, VPNBook,
+community OpenVPN configs and V2Ray). **Chakra Mode** — rotating
+residential/mobile IPs — is in trial phase and currently UI only.
+
+## Free servers — 5 sources, all auto-updating
 
 ### 1. WARP (WireGuard)
-Pehli baar connect karne pe app Cloudflare WARP ke public client API se ek
-**free identity** register karti hai (signup/password nahi). Phir usi identity
-se WireGuard tunnel banta hai. Poori tarah free, koi server kharcha nahi.
+On first connect the app registers a **free identity** with Cloudflare WARP's
+public client API (no signup, no password) and builds a WireGuard tunnel on
+it. Completely free, zero server cost on our side.
 
-> Note: WARP ek anycast privacy network hai — teenon "WARP Free" entries usi
-> network ke alag entry points hain, alag desh nahi.
+> Note: WARP is an anycast privacy network — the three "WARP Free" entries
+> are different entry points to the same network, not different countries.
 
-### 2. VPNGate (OpenVPN) — 🌍 duniya bhar ke desh
-**VPNGate** (University of Tsukuba, Japan) ka volunteer-run free network:
-aam taur pe 50–150+ servers, 10–20 countries (Japan, Korea, US, Germany…).
-Server list seedha `vpngate.net` se aati hai (12 ghante ka cache), isliye
-hamesha taaza rehti hai — app update ki zaroorat nahi. Credentials public
-hain: `vpn` / `vpn`.
+### 2. VPNGate (OpenVPN) — 🌍 servers worldwide
+**VPNGate** (University of Tsukuba, Japan) is a volunteer-run free network:
+usually 50–150+ servers across 10–20 countries (Japan, Korea, US, Germany…).
+The server list is fetched straight from `vpngate.net` (12-hour cache), so it
+stays fresh without app updates. Credentials are public: `vpn` / `vpn`.
 
 ### 3. VPNBook (OpenVPN)
-**VPNBook** ke free servers (US, CA, UK, DE, FR, PL) — TCP 443 pe, firewall
-se bhi nikal jaata hai. Username `vpnbook`, password site se auto-scrape
-(weekly rotate hota hai), config live API se.
+**VPNBook**'s free servers (US, CA, UK, DE, FR, PL) over TCP 443, which gets
+through most firewalls. Username `vpnbook`, password auto-scraped from their
+site (rotates weekly), config from the live API.
 
 ### 4. .ovpn Mirror (OpenVPN)
-Community-maintained free configs (GitHub) — 18 countries, India/Indonesia/
-Thailand/Turkey/UAE bhi. Bina login ke chalte hain.
+Community-maintained free configs (GitHub) — 18 countries including
+India, Indonesia, Thailand, Turkey and the UAE. No login needed.
 
-### 5. V2Ray (Xray/Shadowsocks) — 🚀 sabse zyada servers
-Roz update hone wali public link list (~150-200 servers, 30+ countries).
-Xray core app me embedded hai.
+### 5. V2Ray (Xray/Shadowsocks) — 🚀 the biggest pool
+A daily-updated public link list (~150–200 servers, 30+ countries).
+Xray core is embedded in the app.
 
-Servers tab me **🌍 OpenVPN** tab (VPNGate + VPNBook + Mirror, country-wise)
-aur **🚀 V2Ray** tab: country-wise group, search bhi hai.
+The Servers tab has a **🌍 OpenVPN** tab (VPNGate + VPNBook + Mirror, grouped
+by country) and a **🚀 V2Ray** tab (grouped by country, with search).
 
-> Note: Free servers volunteers/community ke hain — speed server ke hisaab se
-> alag hoti hai. Kam ping + kam users wala server chuno.
-> OpenVPN/V2Ray Android/Android TV pe hain; Windows pe abhi sirf WARP (WireGuard).
+> Note: free servers are run by volunteers and the community — speed varies
+> by server, so pick one with low ping and few users.
+> OpenVPN and V2Ray are on Android/Android TV; on Windows only WARP
+> (WireGuard) works for now.
 
 ## Platforms
 
-- ✅ Android phone (WireGuard + OpenVPN/VPNGate)
-- ✅ Android TV (Leanback launcher support; wahi APK)
-- ✅ Windows (GitHub Actions se build; **Administrator** ke roop me chalana hoga — WireGuard ki requirement hai; VPNGate Windows pe abhi nahi)
+- ✅ Android phone (WireGuard + OpenVPN/VPNGate + V2Ray)
+- ✅ Android TV (Leanback launcher support — the same APK installs on TV)
+- ✅ Windows (built via GitHub Actions; **must be run as Administrator** —
+  a WireGuard requirement; VPNGate isn't on Windows yet)
 
-## Server database (bina app update ke)
+## Server database (no app updates needed)
 
-`servers.json` (repo root me) GitHub se load hoti hai:
+The server list (`servers.json` in the repo root) is loaded from GitHub:
 
-1. **remote** — `raw.githubusercontent.com/shivytyahoo/IPChakra/main/servers.json` (12 ghante ka cache)
-2. **cache** — phone me saved copy
-3. **bundled** — app ke andar wali copy (`app/assets/servers.json`)
+1. **remote** — `raw.githubusercontent.com/shivytyahoo/IPChakra/main/servers.json` (12-hour cache)
+2. **cache** — the copy saved on the phone
+3. **bundled** — the copy shipped inside the app (`app/assets/servers.json`)
 
-Matlab: `servers.json` me naye server add karte hi sab users ke app me aa
-jayenge — Play Store update ki zaroorat nahi. Settings → Server Database →
-Refresh se turant refresh bhi ho sakta hai.
+So the moment a new server is added to `servers.json`, it shows up in every
+user's app — no Play Store update required. You can also force an immediate
+refresh from Settings → Server Database → Refresh.
 
-`servers.json` ka format:
+`servers.json` format:
 
 ```json
 {
@@ -82,9 +86,9 @@ Refresh se turant refresh bhi ho sakta hai.
 }
 ```
 
-- `warp: true` → app khud free WARP identity se connect karegi.
-- `type: "custom"` + `peer_public_key` + `endpoint` → apne WireGuard VPS ka server.
-- `type: "chakra"` → Chakra Mode (residential rotation) — abhi UI only.
+- `warp: true` → the app connects with its own free WARP identity.
+- `type: "custom"` with `peer_public_key` + `endpoint` → your own WireGuard VPS.
+- `type: "chakra"` → Chakra Mode (residential rotation) — UI only for now.
 
 ## Build
 
@@ -92,12 +96,12 @@ Refresh se turant refresh bhi ho sakta hai.
 cd app
 flutter pub get
 flutter analyze
-flutter build apk --debug     # Android (phone + TV)
-flutter build windows --release  # Windows (Windows host chahiye)
+flutter build apk --debug        # Android (phone + TV)
+flutter build windows --release  # Windows (needs a Windows host)
 ```
 
-Android TV: manifest me `LEANBACK_LAUNCHER` + banner pehle se hai —
-wahi APK TV pe bhi install hoga.
+Android TV: the manifest already has `LEANBACK_LAUNCHER` + a banner, so the
+same APK installs on TV.
 
 ## Project structure
 
