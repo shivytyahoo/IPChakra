@@ -1,0 +1,73 @@
+name: Build IPChakra
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore binary assets
+        run: bash tools/restore_binaries.sh
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.5"
+          channel: stable
+      - name: Install dependencies
+        run: flutter pub get
+        working-directory: app
+      - name: Analyze
+        run: flutter analyze
+        working-directory: app
+      - name: Build debug APK (phone + Android TV universal)
+        run: flutter build apk --debug
+        working-directory: app
+      - name: Build release APK
+        run: flutter build apk --release
+        working-directory: app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipchakra-android-apk
+          path: |
+            app/build/app/outputs/flutter-apk/app-debug.apk
+            app/build/app/outputs/flutter-apk/app-release.apk
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore binary assets
+        shell: bash
+        run: bash tools/restore_binaries.sh
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.5"
+          channel: stable
+      - name: Enable Windows desktop
+        run: flutter config --enable-windows-desktop
+      - name: Install dependencies
+        run: flutter pub get
+        working-directory: app
+      - name: Analyze
+        run: flutter analyze
+        working-directory: app
+      - name: Build Windows release
+        run: flutter build windows --release
+        working-directory: app
+      - name: Zip Windows build
+        run: Compress-Archive -Path app\build\windows\x64\runner\Release\* -DestinationPath ipchakra-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipchakra-windows
+          path: ipchakra-windows.zip
+
+  # NOTE: Windows app ko Administrator ke roop me chalana hoga
+  # (WireGuard ki requirement hai). Release APK signing abhi
+  # debug key se hai — Play Store ke liye release keystore chahiye.
