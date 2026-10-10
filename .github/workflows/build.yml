@@ -1,73 +1,166 @@
 name: Build IPChakra
 
+# Builds the IPChakra Android APK (and the Windows app) from a clean checkout.
+#
+# Some native binaries are deliberately not stored in git (see README,
+# "Building from source"), so each job restores them before building:
+#   1. tools/restore_binaries.sh rebuilds the chunked binary assets
+#      (icons, jars, WireGuard amd64 Windows libraries) from tools/binaries/.
+#   2. The Xray core binaries of the vendored flutter_v2ray_client package
+#      (libv2ray.aar + libtun2socks.so) are copied from the official
+#      flutter_v2ray_client 3.5.0 archive on pub.dev.
+#   3. The WireGuard Windows arm64 DLLs are copied from the official
+#      wireguard_flutter 0.1.3 archive on pub.dev (Windows job only).
+
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   android:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Restore binary assets
+
+      - name: Restore chunked binary assets
         run: bash tools/restore_binaries.sh
+
+      - name: Restore Xray core binaries (flutter_v2ray_client 3.5.0)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP="$(mktemp -d)"
+          curl -fsSL "https://pub.dev/api/archives/flutter_v2ray_client-3.5.0.tar.gz" -o "$TMP/v2ray.tar.gz"
+          tar -xzf "$TMP/v2ray.tar.gz" -C "$TMP"
+          DEST="packages/flutter_v2ray_client/android"
+          mkdir -p "$DEST/libs"
+          cp "$TMP/android/libs/libv2ray.aar" "$DEST/libs/libv2ray.aar"
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            mkdir -p "$DEST/src/main/jniLibs/$abi"
+            cp "$TMP/android/src/main/jniLibs/$abi/libtun2socks.so" "$DEST/src/main/jniLibs/$abi/libtun2socks.so"
+          done
+          # Fail loudly if anything is missing, and show what was restored.
+          for f in \
+            "$DEST/libs/libv2ray.aar" \
+            "$DEST/src/main/jniLibs/arm64-v8a/libtun2socks.so" \
+            "$DEST/src/main/jniLibs/armeabi-v7a/libtun2socks.so" \
+            "$DEST/src/main/jniLibs/x86/libtun2socks.so" \
+            "$DEST/src/main/jniLibs/x86_64/libtun2socks.so"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Missing restored binary: $f"
+              exit 1
+            fi
+            ls -la "$f"
+          done
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.47.5"
           channel: stable
+
       - name: Install dependencies
         run: flutter pub get
         working-directory: app
+
       - name: Analyze
         run: flutter analyze
         working-directory: app
-      - name: Build debug APK (phone + Android TV universal)
-        run: flutter build apk --debug
+
+      - name: Test
+        run: flutter test
         working-directory: app
+
       - name: Build release APK
         run: flutter build apk --release
         working-directory: app
+
       - uses: actions/upload-artifact@v4
         with:
-          name: ipchakra-android-apk
-          path: |
-            app/build/app/outputs/flutter-apk/app-debug.apk
-            app/build/app/outputs/flutter-apk/app-release.apk
+          name: ipchakra-v2.2.0-android
+          path: app/build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Attach APK to the GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/app/outputs/flutter-apk/app-release.apk
+          body: |
+            ## IPChakra ${{ github.ref_name }}
+
+            Free VPN for Android & Android TV — WARP (WireGuard), OpenVPN and
+            Stealth Xray (VLESS + Reality, Hysteria2, Trojan, Shadowsocks) with
+            verified connections, smart DNS escalation and self-healing sessions.
+
+            Download **app-release.apk** below and install it on your phone or
+            Android TV. See the README for what is new in this release.
+
+            Made with ❤️ by Shiv
 
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Restore binary assets
+
+      - name: Restore chunked binary assets
         shell: bash
         run: bash tools/restore_binaries.sh
+
+      - name: Restore WireGuard arm64 DLLs (wireguard_flutter 0.1.3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          TMP="$(mktemp -d)"
+          curl -fsSL "https://pub.dev/api/archives/wireguard_flutter-0.1.3.tar.gz" -o "$TMP/wg.tar.gz"
+          tar -xzf "$TMP/wg.tar.gz" -C "$TMP"
+          DEST="packages/wireguard_flutter/windows/lib"
+          for f in tunnel/arm64/tunnel.dll wireguard/arm64/wireguard.dll; do
+            mkdir -p "$DEST/$(dirname "$f")"
+            cp "$TMP/windows/lib/$f" "$DEST/$f"
+            if [ ! -s "$DEST/$f" ]; then
+              echo "::error::Missing restored binary: $DEST/$f"
+              exit 1
+            fi
+            ls -la "$DEST/$f"
+          done
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.47.5"
           channel: stable
+
       - name: Enable Windows desktop
         run: flutter config --enable-windows-desktop
+
       - name: Install dependencies
         run: flutter pub get
         working-directory: app
+
       - name: Analyze
         run: flutter analyze
         working-directory: app
+
       - name: Build Windows release
         run: flutter build windows --release
         working-directory: app
+
       - name: Zip Windows build
         run: Compress-Archive -Path app\build\windows\x64\runner\Release\* -DestinationPath ipchakra-windows.zip
+
       - uses: actions/upload-artifact@v4
         with:
           name: ipchakra-windows
           path: ipchakra-windows.zip
 
-  # NOTE: Windows app ko Administrator ke roop me chalana hoga
-  # (WireGuard ki requirement hai). Release APK signing abhi
-  # debug key se hai — Play Store ke liye release keystore chahiye.
+  # NOTE: The Windows app must be run as Administrator (a WireGuard
+  # requirement). The release APK is signed with the debug key for now;
+  # a dedicated release keystore is needed for store distribution.
