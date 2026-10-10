@@ -4,17 +4,33 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/vpn_server.dart';
+import 'stealth_link.dart';
 
-/// Saare free servers ka health check — kaun working, kaun dead.
+/// Health check for every free server: which are working, which are
+/// dead, and how fast each working server answers.
 ///
-/// Har server ke host:port pe chhota TCP probe (2s timeout). Result
-/// `status[serverId]` me: true = working, false = dead, missing = unchecked.
-/// UI progressive update hota hai — batch complete hote hi badges flip hote hain.
+/// Every server gets a short TCP probe (1.5 s timeout) against its
+/// host:port. The result lands in `status[serverId]`: true = working,
+/// false = dead, missing = unchecked. Successful TCP probes also record
+/// their round-trip time in [latencyMs], which drives fastest-first
+/// ordering. The UI updates progressively — badges flip as each batch
+/// completes.
 class HealthService extends ChangeNotifier {
   static const _kMirrorTargets = 'health_mirror_targets';
 
+  /// Probe timeout for a single TCP connect.
+  static const probeTimeout = Duration(milliseconds: 1500);
+
+  /// Servers probed concurrently in one batch.
+  static const batchSize = 30;
+
   /// serverId -> working?
   final Map<String, bool> status = {};
+
+  /// serverId -> measured TCP connect latency in milliseconds.
+  /// Only present for servers whose probe succeeded over TCP; WARP
+  /// (never probed) and UDP-only servers carry no latency.
+  final Map<String, int> latencyMs = {};
 
   /// Abhi check ho rahe server ids.
   final Set<String> checkingIds = {};
@@ -29,15 +45,19 @@ class HealthService extends ChangeNotifier {
   bool? isWorking(String id) => status[id];
   bool isChecking(String id) => checkingIds.contains(id);
 
+  /// Measured latency for [id], or null when it was never measured
+  /// (WARP, UDP-only servers, unchecked or dead servers).
+  int? latencyOf(String id) => latencyMs[id];
+
   int get workingCount => status.values.where((v) => v).length;
   int get deadCount => status.values.where((v) => !v).length;
 
+  /// Full re-check of every server in [servers] (manual refresh).
   Future<void> checkAll(List<VpnServer> servers) async {
     if (checking) return;
     checking = true;
     notifyListeners();
     try {
-      const batchSize = 20;
       for (var i = 0; i < servers.length; i += batchSize) {
         final batch = servers.skip(i).take(batchSize).toList();
         await Future.wait(batch.map(_checkOne));
@@ -51,27 +71,106 @@ class HealthService extends ChangeNotifier {
     }
   }
 
-  Future<void> _checkOne(VpnServer s) async {
-    checkingIds.add(s.id);
+  /// The currently running [checkMissing] pass chain, if any.
+  Future<void>? _missingRun;
+
+  /// Incremental check: probe only the servers in [servers] that have
+  /// no health result yet. Safe to call repeatedly and concurrently —
+  /// calls made while a run is in flight wait for it and then re-scan,
+  /// so servers that arrive late (for example a stealth feed landing
+  /// after the WARP list) are still picked up instead of staying
+  /// "unchecked" forever. At most two passes run per call chain.
+  Future<void> checkMissing(List<VpnServer> servers) {
+    final active = _missingRun;
+    if (active != null) {
+      return active.then((_) => checkMissing(servers));
+    }
+    late final Future<void> run;
+    run = _runMissingPasses(servers).whenComplete(() {
+      if (identical(_missingRun, run)) _missingRun = null;
+    });
+    _missingRun = run;
+    return run;
+  }
+
+  Future<void> _runMissingPasses(List<VpnServer> servers) async {
     try {
-      // WARP Cloudflare ka anycast network hai — single server nahi, isliye
-      // "dead" ka concept hi nahi. Hamesha working.
+      for (var pass = 0; pass < 2; pass++) {
+        final missing = servers
+            .where(
+              (s) => !status.containsKey(s.id) && !checkingIds.contains(s.id),
+            )
+            .toList();
+        if (missing.isEmpty) return;
+        for (var i = 0; i < missing.length; i += batchSize) {
+          final batch = missing.skip(i).take(batchSize).toList();
+          await Future.wait(batch.map(_checkOne));
+          notifyListeners(); // progressive UI
+        }
+        lastChecked = DateTime.now();
+        notifyListeners();
+      }
+    } catch (_) {
+      // Probing is best-effort; individual failures are recorded as
+      // "dead" by _checkOne itself.
+    }
+  }
+
+  Future<void> _checkOne(VpnServer s) async {
+    // Never probe the same server twice at once, however many checks
+    // (full, incremental, concurrent) are running.
+    if (!checkingIds.add(s.id)) return;
+    try {
+      // WARP is Cloudflare's anycast network, not a single server, so
+      // the notion of "dead" does not apply — and WireGuard runs over
+      // UDP, so a TCP probe would report a working tunnel as dead.
+      // Always working, never probed, no latency.
       if (s.source == 'warp' || s.warp) {
         status[s.id] = true;
         return;
       }
+      // Hysteria2 runs over UDP/QUIC: its port will usually refuse a
+      // TCP probe even when the server is perfectly healthy, so a
+      // failed probe must NEVER mark it dead. Use host-level
+      // reachability instead (any TCP answer on its port, else on
+      // 443/80, like the UDP OpenVPN fallback): reachable means
+      // working (with no latency — QUIC speed is not measurable this
+      // way), unreachable means "leave it unchecked", never dead.
+      if (s.tier == 'Hysteria2') {
+        final t = _parseLinkTarget(s.shareLink);
+        if (t == null) return;
+        if (await _udpHostProbe(t.$1, t.$2)) {
+          status[s.id] = true;
+        } else {
+          status.remove(s.id);
+          latencyMs.remove(s.id);
+        }
+        return;
+      }
       final target = await _resolveTarget(s);
       if (target == null) {
-        status[s.id] = false;
+        _recordResult(s.id, false);
       } else if (!target.$3) {
-        status[s.id] = await _tcpProbe(target.$1, target.$2);
+        final ms = await _tcpProbe(target.$1, target.$2);
+        _recordResult(s.id, ms != null, latency: ms);
       } else {
-        status[s.id] = await _udpHostProbe(target.$1, target.$2);
+        _recordResult(s.id, await _udpHostProbe(target.$1, target.$2));
       }
     } catch (_) {
-      status[s.id] = false;
+      _recordResult(s.id, false);
     } finally {
       checkingIds.remove(s.id);
+    }
+  }
+
+  /// Store one probe outcome. A dead verdict clears any stale latency
+  /// so fastest-first ordering never trusts an old measurement.
+  void _recordResult(String id, bool working, {int? latency}) {
+    status[id] = working;
+    if (working && latency != null) {
+      latencyMs[id] = latency;
+    } else if (!working) {
+      latencyMs.remove(id);
     }
   }
 
@@ -87,7 +186,13 @@ class HealthService extends ChangeNotifier {
       case 'mirror':
         return _mirrorTarget(s);
       case 'v2ray':
-        final t = _parseSsTarget(s.shareLink);
+      case 'custom':
+      case 'private':
+        // Stealth links (public feed 'v2ray', user-imported 'custom'
+        // and private-feed 'private') can be any scheme — ss, vless,
+        // trojan or vmess — so resolve the probe target with the
+        // general stealth parser.
+        final t = _parseLinkTarget(s.shareLink);
         return t == null ? null : (t.$1, t.$2, false);
       default:
         return null;
@@ -156,13 +261,22 @@ class HealthService extends ChangeNotifier {
     return (m.group(1)!, port, proto.contains('udp'));
   }
 
-  /// UDP OpenVPN server: VPN port pe TCP try karo (kuch dono sunte hain),
-  /// phir host ke 443/80 — koi bhi khula to host up hai.
+  /// UDP OpenVPN server: try TCP on the VPN port (some hosts listen on
+  /// both), then on 443/80 — any open port means the host is up.
   Future<bool> _udpHostProbe(String host, int port) async {
-    if (await _tcpProbe(host, port)) return true;
-    if (port != 443 && await _tcpProbe(host, 443)) return true;
-    if (port != 80 && await _tcpProbe(host, 80)) return true;
+    if (await _tcpProbe(host, port) != null) return true;
+    if (port != 443 && await _tcpProbe(host, 443) != null) return true;
+    if (port != 80 && await _tcpProbe(host, 80) != null) return true;
     return false;
+  }
+
+  /// Host and port for any stealth share link (ss/vless/trojan/vmess),
+  /// resolved via [StealthLink]. Returns null for non-stealth links.
+  (String, int)? _parseLinkTarget(String? link) {
+    if (link == null) return null;
+    final info = StealthLink.parse(link);
+    if (info == null) return null;
+    return (info.host, info.port);
   }
 
   /// ss://BASE64@host:port se host:port.
@@ -186,20 +300,23 @@ class HealthService extends ChangeNotifier {
     }
   }
 
-  /// Chhota TCP handshake — server reachable hai ya nahi.
-  Future<bool> _tcpProbe(String host, int port) async {
+  /// Short TCP handshake — returns the connect latency in
+  /// milliseconds when the server answers, null when it does not.
+  Future<int?> _tcpProbe(String host, int port) async {
+    final watch = Stopwatch()..start();
     try {
-      final socket = await Socket.connect(host, port,
-          timeout: const Duration(seconds: 2));
+      final socket = await Socket.connect(host, port, timeout: probeTimeout);
+      watch.stop();
       socket.destroy();
-      return true;
+      return watch.elapsedMilliseconds;
     } catch (_) {
-      return false;
+      return null;
     }
   }
 
   void reset() {
     status.clear();
+    latencyMs.clear();
     checkingIds.clear();
     checking = false;
     lastChecked = null;
@@ -213,4 +330,63 @@ class HealthService extends ChangeNotifier {
   /// Sirf test ke liye.
   @visibleForTesting
   (String, int)? debugParseSs(String? l) => _parseSsTarget(l);
+
+  /// Test-only: host/port for any stealth share link scheme.
+  @visibleForTesting
+  (String, int)? debugParseLink(String? l) => _parseLinkTarget(l);
+}
+
+/// The one shared server ordering, used by the Home screen, the
+/// Servers screen and Stealth Auto alike:
+///
+/// 1. Working servers with a known speed — fastest first. The speed is
+///    the measured probe latency when present, otherwise the ping the
+///    source API reported ([VpnServer.pingMs], e.g. VPNGate).
+/// 2. Working servers with no speed information.
+/// 3. Unchecked servers, keeping their input order (tier order for
+///    stealth lists, API order for OpenVPN sources).
+/// 4. Dead servers last.
+///
+/// The sort is stable: servers that compare equal keep input order.
+List<VpnServer> sortByHealthAndLatency(
+  List<VpnServer> servers,
+  HealthService health,
+) {
+  int rankOf(VpnServer s) {
+    final working = health.isWorking(s.id);
+    if (working == true) {
+      return (health.latencyOf(s.id) != null || s.pingMs != null) ? 0 : 1;
+    }
+    if (working == null) return 2;
+    return 3;
+  }
+
+  int? speedOf(VpnServer s) => health.latencyOf(s.id) ?? s.pingMs;
+
+  final decorated = <(int, int?, int, VpnServer)>[
+    for (var i = 0; i < servers.length; i++)
+      (rankOf(servers[i]), speedOf(servers[i]), i, servers[i]),
+  ];
+  decorated.sort((a, b) {
+    final byRank = a.$1.compareTo(b.$1);
+    if (byRank != 0) return byRank;
+    final sa = a.$2;
+    final sb = b.$2;
+    if (sa != null && sb != null) {
+      final bySpeed = sa.compareTo(sb);
+      if (bySpeed != 0) return bySpeed;
+    }
+    return a.$3.compareTo(b.$3);
+  });
+  return [for (final e in decorated) e.$4];
+}
+
+/// Drop the servers [health] has marked dead — unless every server is
+/// dead, in which case the full list is returned (trying a "dead"
+/// server beats not trying at all; probes can be wrong).
+List<VpnServer> aliveOrAll(List<VpnServer> servers, HealthService health) {
+  final alive = servers
+      .where((s) => health.isWorking(s.id) != false)
+      .toList();
+  return alive.isNotEmpty ? alive : servers;
 }

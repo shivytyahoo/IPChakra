@@ -107,12 +107,22 @@ class WarpService {
     );
   }
 
-  /// wireguard_flutter ke liye wg-quick config text.
-  String buildQuickConfig(WarpConfig w, String endpoint) {
+  /// wg-quick config text for wireguard_flutter.
+  ///
+  /// [dnsServers] is the user's selected DNS provider pair; when
+  /// omitted, the historical Cloudflare default applies.
+  String buildQuickConfig(
+    WarpConfig w,
+    String endpoint, {
+    List<String>? dnsServers,
+  }) {
+    final dns = (dnsServers == null || dnsServers.isEmpty)
+        ? '1.1.1.1, 1.0.0.1'
+        : dnsServers.join(', ');
     return '[Interface]\n'
         'PrivateKey = ${w.privateKey}\n'
         'Address = ${w.addressV4}\n'
-        'DNS = 1.1.1.1, 1.0.0.1\n'
+        'DNS = $dns\n'
         '\n'
         '[Peer]\n'
         'PublicKey = ${w.peerPublicKey}\n'

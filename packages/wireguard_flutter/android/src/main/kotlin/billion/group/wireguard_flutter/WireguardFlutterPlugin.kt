@@ -10,10 +10,13 @@ import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.PluginRegistry
 
+import android.Manifest
 import android.app.Activity
 import io.flutter.embedding.android.FlutterActivity
 import android.content.Intent
 import android.content.Context
+import android.content.pm.PackageManager
+import androidx.core.app.ActivityCompat
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -33,6 +36,7 @@ import java.io.ByteArrayInputStream
 /** WireguardFlutterPlugin */
 
 const val PERMISSIONS_REQUEST_CODE = 10014
+const val NOTIFICATIONS_REQUEST_CODE = 10015
 const val METHOD_CHANNEL_NAME = "billion.group.wireguard_flutter/wgcontrol"
 const val METHOD_EVENT_NAME = "billion.group.wireguard_flutter/wgstage"
 
@@ -55,8 +59,32 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     companion object {
         private var state: String = "no_connection"
 
+        // IPChakra patch (see PATCHES.md, Patch 2): the live plugin
+        // instance, so the connection notification's Disconnect
+        // receiver can reach the backend. Set on engine attach,
+        // cleared on detach.
+        @Volatile
+        var activeInstance: WireguardFlutterPlugin? = null
+
         fun getStatus(): String {
             return state
+        }
+
+        /**
+         * Entry point for the notification's Disconnect action:
+         * performs exactly the same backend stop as an in-app
+         * disconnect, so the tunnel's state-change callback reports
+         * the stop to Dart like any other native stop. With no live
+         * plugin the notification is stale (the tunnel lived in this
+         * process) and is simply removed.
+         */
+        fun stopFromNotification(context: Context) {
+            val plugin = activeInstance
+            if (plugin != null) {
+                plugin.performDisconnect(null)
+            } else {
+                WgNotification.cancel(context)
+            }
         }
     }
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
@@ -95,6 +123,7 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             }
         }
 
+        activeInstance = this
         channel.setMethodCallHandler(this)
         events.setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -164,6 +193,27 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                 checkPermission()
                 result.success(null)
             }
+            "requestNotificationPermission" -> {
+                // IPChakra patch (see PATCHES.md, Patch 2): the
+                // connection notification needs POST_NOTIFICATIONS on
+                // Android 13+. Upstream only ever requested the VPN
+                // consent, which is why a Free-mode connect could not
+                // show a notification even once one existed.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    val act = activity
+                    if (act != null &&
+                        ActivityCompat.checkSelfPermission(act, Manifest.permission.POST_NOTIFICATIONS) !=
+                        PackageManager.PERMISSION_GRANTED
+                    ) {
+                        ActivityCompat.requestPermissions(
+                            act,
+                            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                            NOTIFICATIONS_REQUEST_CODE
+                        )
+                    }
+                }
+                result.success(null)
+            }
             else -> flutterNotImplemented(result)
         }
     }
@@ -189,6 +239,15 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
             val updatedStage = stage ?: "no_connection"
             state = updatedStage
             vpnStageSink?.success(updatedStage.lowercase(Locale.ROOT))
+            // IPChakra patch (see PATCHES.md, Patch 2): keep the
+            // persistent connection notification in step with the
+            // tunnel — shown while connected, removed when the
+            // tunnel is fully down, whatever caused the change
+            // (in-app disconnect, notification action, system stop).
+            when (updatedStage.lowercase(Locale.ROOT)) {
+                "connected" -> WgNotification.show(context)
+                "disconnected", "no_connection" -> WgNotification.cancel(context)
+            }
         }
     }
     private fun updateStageFromState(state: Tunnel.State) {
@@ -201,6 +260,16 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
         }
     }
     private fun disconnect(result: Result) {
+        performDisconnect(result)
+    }
+
+    /**
+     * The one tunnel stop, shared by the method channel and by the
+     * connection notification's Disconnect action (IPChakra patch,
+     * Patch 2 — [result] is null in that case). Behaviour is
+     * otherwise identical to upstream.
+     */
+    fun performDisconnect(result: Result?) {
         scope.launch(Dispatchers.IO) {
             try {
                 if (futureBackend.await().runningTunnelNames.isEmpty()) {
@@ -217,13 +286,19 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
                     }, Tunnel.State.DOWN, config
                 )
                 Log.i(TAG, "Disconnect - success!")
-                flutterSuccess(result, "")
+                if (result != null) {
+                    flutterSuccess(result, "")
+                }
             } catch (e: BackendException) {
                 Log.e(TAG, "Disconnect - BackendException - ERROR - ${e.reason}", e)
-                flutterError(result, e.reason.toString())
+                if (result != null) {
+                    flutterError(result, e.reason.toString())
+                }
             } catch (e: Throwable) {
                 Log.e(TAG, "Disconnect - Can't disconnect from tunnel: ${e.message}")
-                flutterError(result, e.message.toString())
+                if (result != null) {
+                    flutterError(result, e.message.toString())
+                }
             }
         }
     }
@@ -282,6 +357,9 @@ class WireguardFlutterPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        if (activeInstance === this) {
+            activeInstance = null
+        }
         channel.setMethodCallHandler(null)
         events.setStreamHandler(null)
         isVpnChecked = false

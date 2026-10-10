@@ -142,10 +142,9 @@ packages:
   flutter_v2ray_client:
     dependency: "direct main"
     description:
-      name: flutter_v2ray_client
-      sha256: d3f4282294379956705b3a1391f10bde83e8a9c6e6e3a642c236f9db18926085
-      url: "https://pub.dev"
-    source: hosted
+      path: "../packages/flutter_v2ray_client"
+      relative: true
+    source: path
     version: "3.5.0"
   flutter_web_plugins:
     dependency: transitive

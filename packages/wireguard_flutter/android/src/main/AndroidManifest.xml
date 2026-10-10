@@ -1,2 +1,20 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- IPChakra patch (see PATCHES.md, Patch 2): needed on
+         Android 13+ so the WireGuard connection notification can be
+         posted at all. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <!-- IPChakra patch: receives the connection notification's
+             Disconnect action. Not exported — only this app can
+             address it, and its pending intent is created by the
+             app itself. -->
+        <receiver
+            android:name="billion.group.wireguard_flutter.WgDisconnectReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="billion.group.wireguard_flutter.ACTION_DISCONNECT" />
+            </intent-filter>
+        </receiver>
+    </application>
 </manifest>

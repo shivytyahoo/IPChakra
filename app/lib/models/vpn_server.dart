@@ -20,6 +20,10 @@ class VpnServer {
   /// Runtime-only: V2Ray share link (ss://, vmess:// ...).
   final String? shareLink;
 
+  /// Stealth tier for V2Ray/Xray servers:
+  /// 'Reality' | 'TLS' | 'Shadowsocks' | 'VMess' | '' (non-stealth).
+  final String tier;
+
   /// Kahan se aaya: 'warp' | 'vpngate' | 'vpnbook' | 'mirror' | 'v2ray' | 'chakra' | 'custom'
   final String source;
 
@@ -46,6 +50,7 @@ class VpnServer {
     this.pingMs,
     this.ovpnConfig,
     this.shareLink,
+    this.tier = '',
     this.source = 'custom',
     this.configLoader,
     this.authUsername,
@@ -53,6 +58,9 @@ class VpnServer {
   });
 
   bool get isChakra => type == 'chakra';
+
+  /// True for any V2Ray/Xray (stealth-capable) server.
+  bool get isStealth => protocol == 'v2ray';
 
   /// Kya is server se abhi connect ho sakta hai?
   bool get connectable =>
@@ -72,7 +80,8 @@ class VpnServer {
         peerPublicKey: j['peer_public_key']?.toString(),
         note: j['note']?.toString() ?? '',
         enabled: j['enabled'] != false,
-        // warp servers ki source JSON me nahi hoti — yahin set karo
+        tier: j['tier']?.toString() ?? '',
+        // warp servers carry no source in JSON — set it here
         source: j['source']?.toString() ?? (isWarp ? 'warp' : 'custom'),
       );
   }

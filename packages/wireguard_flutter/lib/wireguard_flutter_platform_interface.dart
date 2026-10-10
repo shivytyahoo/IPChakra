@@ -13,6 +13,13 @@ abstract class WireGuardFlutterInterface {
 
   Future<void> refreshStage();
   Future<VpnStage> stage();
+
+  /// Asks the system for the POST_NOTIFICATIONS permission
+  /// (Android 13+) so the connection notification can be shown.
+  ///
+  /// IPChakra patch (see PATCHES.md, Patch 2). Default no-op for
+  /// platforms without a notification permission.
+  Future<void> requestNotificationPermission() async {}
   Future<bool> isConnected() =>
       stage().then((stage) => stage == VpnStage.connected);
 }

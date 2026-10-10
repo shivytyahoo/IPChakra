@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 2.2.0+11
 
 environment:
   sdk: ^3.13.4
@@ -50,10 +50,22 @@ dependencies:
 dependency_overrides:
   wireguard_flutter:
     path: ../packages/wireguard_flutter
+  # The vendored wireguard_flutter also carries IPChakra's patch
+  # for the persistent connection notification with a working
+  # Disconnect action (upstream and its GoBackend post no
+  # notification at all) — see ../packages/wireguard_flutter/PATCHES.md.
   # openvpn_flutter 1.3.4 me purana AGP (7.4.2) hai; repo me vendored copy
   # me sirf AGP 9.1.0 kiya gaya hai — Dart API me koi badlaav nahi.
   openvpn_flutter:
     path: ../packages/openvpn_flutter
+  # flutter_v2ray_client 3.5.0 is vendored so the VPN notification's
+  # Disconnect button can be fixed: upstream wires the button to the
+  # app-launch intent instead of its own STOP_SERVICE intent, so the
+  # tunnel never stopped. Only that one wiring line is patched — see
+  # ../packages/flutter_v2ray_client/PATCHES.md. Dart API and the
+  # package version are unchanged.
+  flutter_v2ray_client:
+    path: ../packages/flutter_v2ray_client
 
 dev_dependencies:
   flutter_test:

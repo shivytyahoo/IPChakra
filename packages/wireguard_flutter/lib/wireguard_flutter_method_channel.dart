@@ -45,6 +45,11 @@ class WireGuardFlutterMethodChannel extends WireGuardFlutterInterface {
   @override
   Future<void> stopVpn() => _methodChannel.invokeMethod('stop');
 
+  /// IPChakra patch (see PATCHES.md, Patch 2).
+  @override
+  Future<void> requestNotificationPermission() =>
+      _methodChannel.invokeMethod('requestNotificationPermission');
+
   @override
   Future<void> refreshStage() => _methodChannel.invokeMethod("refresh");
 

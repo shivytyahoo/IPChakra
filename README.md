@@ -1,126 +1,85 @@
-# 🌀 IPChakra
+# IPChakra
 
-A free, fast VPN app for Android, Android TV and Windows.
+A free VPN app for Android phones and Android TV, with a premium interface and three engines under one roof: WireGuard (Cloudflare WARP), OpenVPN, and Xray. IPChakra's speciality is its **Stealth mode** — modern censorship-resistant protocols (VLESS + Reality, Hysteria2, Trojan/TLS, Shadowsocks, VMess) with a connect system that only declares "Connected" after the tunnel has been *proven* to carry traffic with the DNS you chose.
 
-**Free Mode** gives you an unlimited free VPN (WARP, VPNGate, VPNBook,
-community OpenVPN configs and V2Ray). **Chakra Mode** — rotating
-residential/mobile IPs — is in trial phase and currently UI only.
+**Current release: v2.2.0 "Stealth Resilience"**
 
-## Free servers — 5 sources, all auto-updating
+Made with ❤️ by Shiv
 
-### 1. WARP (WireGuard)
-On first connect the app registers a **free identity** with Cloudflare WARP's
-public client API (no signup, no password) and builds a WireGuard tunnel on
-it. Completely free, zero server cost on our side.
+---
 
-> Note: WARP is an anycast privacy network — the three "WARP Free" entries
-> are different entry points to the same network, not different countries.
+## Modes
 
-### 2. VPNGate (OpenVPN) — 🌍 servers worldwide
-**VPNGate** (University of Tsukuba, Japan) is a volunteer-run free network:
-usually 50–150+ servers across 10–20 countries (Japan, Korea, US, Germany…).
-The server list is fetched straight from `vpngate.net` (12-hour cache), so it
-stays fresh without app updates. Credentials are public: `vpn` / `vpn`.
+- **Free** — WireGuard tunnels: Cloudflare WARP (1.1.1.1) endpoints plus any custom WireGuard server from the database. One tap, first-tap connect, with a persistent notification and a working Disconnect action.
+- **Stealth** — Xray-powered servers (VLESS Reality, Hysteria2, Trojan/TLS, Shadowsocks, VMess) for networks that block ordinary VPNs. Connect by picking a server, or use **Stealth Auto**, which walks a ranked ladder of servers and DNS combinations until one verifies end to end.
+- **Chakra** — rotating residential IP mode. Visible in the app as a placeholder; it goes live in a later phase (it needs exit-node infrastructure that is not part of this repository yet).
 
-### 3. VPNBook (OpenVPN)
-**VPNBook**'s free servers (US, CA, UK, DE, FR, PL) over TCP 443, which gets
-through most firewalls. Username `vpnbook`, password auto-scraped from their
-site (rotates weekly), config from the live API.
+## Why Stealth connects differently
 
-### 4. .ovpn Mirror (OpenVPN)
-Community-maintained free configs (GitHub) — 18 countries including
-India, Indonesia, Thailand, Turkey and the UAE. No login needed.
+Most VPN apps show "Connected" the moment the tunnel service starts — even if no traffic actually flows, which leaks your real IP the moment you start browsing. IPChakra never does that:
 
-### 5. V2Ray (Xray/Shadowsocks) — 🚀 the biggest pool
-A daily-updated public link list (~150–200 servers, 30+ countries).
-Xray core is embedded in the app.
+1. **Verified connect.** A connection is accepted only after a real DNS answer arrives *through the tunnel* from the combination's resolver **and** a hostname fetch returns the tunnel's exit IP (different from your real one).
+2. **DNS escalation, server fixed.** On a manual connect the app tries, in order: your selected DNS → every other answering DNS provider in speed order → a last-resort default-DNS configuration — all against *your* chosen server. The server never changes behind your back; only the DNS escalates.
+3. **Stability gate.** After verification, two further probes a few seconds apart must pass with the same exit IP before the UI is allowed to say **Connected**.
+4. **Self-healing sessions.** While connected, a watchdog probes the tunnel every ~25 seconds. If the tunnel silently dies (the native layer has *not* reported a stop), the app shows **Reconnecting** — never a false "Connected" — and rebuilds the session on the same server. A stop *you* initiate (app button, notification, Android Settings or quick tile) always wins instantly and nothing ever reconnects on its own.
+5. **Live attempt log.** Every step is narrated on the Home screen in plain English — which DNS is being tried, which failed, and the success line appears *before* the Connected state.
+6. **DNS you can audit.** Pick from 27 DNS providers in Settings (Cloudflare, Quad9, Control D, AdGuard, NextDNS, CleanBrowsing and more). The Home status card always shows the DNS **actually in use** — including when a fallback provider carried the connection instead of your pick.
 
-The Servers tab has a **🌍 OpenVPN** tab (VPNGate + VPNBook + Mirror, grouped
-by country) and a **🚀 V2Ray** tab (grouped by country, with search).
+## Server database
 
-> Note: free servers are run by volunteers and the community — speed varies
-> by server, so pick one with low ping and few users.
-> OpenVPN and V2Ray are on Android/Android TV; on Windows only WARP
-> (WireGuard) works for now.
+The server lists live in this repository and update **without an app update**:
 
-## Platforms
+- [`servers.json`](servers.json) — Free/WARP and custom servers (currently version 2, generated 2026-10-10). The app re-checks it about once an hour and shows the database version and "Last checked" time in Settings.
+- [`stealth.json`](stealth.json) — optional private Stealth server list, merged into the app's pool when present.
+- Stealth additionally syncs from public subscription feeds (about 450 curated servers ship with the app: Reality, Hysteria2, TLS, Shadowsocks and VMess tiers) and can import share links you paste yourself.
 
-- ✅ Android phone (WireGuard + OpenVPN/VPNGate + V2Ray)
-- ✅ Android TV (Leanback launcher support — the same APK installs on TV)
-- ✅ Windows (built via GitHub Actions; **must be run as Administrator** —
-  a WireGuard requirement; VPNGate isn't on Windows yet)
+## What's new — version history
 
-## Server database (no app updates needed)
+| Version | Date | Highlights |
+|---|---|---|
+| **2.2.0** | 2026-10-10 | **Stealth Resilience.** DNS escalation tiers with the server fixed, stability gate before "Connected", watchdog self-healing with a Reconnecting state, live English attempt log, Settings "Privacy & Leak Protection" note with a shortcut to Android's VPN settings. |
+| 2.1.5 | 2026-10-10 | Home status card shows the DNS actually in use for the live session. |
+| 2.1.4 | 2026-10-10 | Regression fix: engine stop "echoes" are now attributed to the stop that caused them, so Stealth Auto and WARP connect on the first tap again. |
+| 2.1.3 | 2026-10-10 | App reconciles its state with the real tunnel state on start/resume (no more stale "Connected"); Free mode gained its persistent notification with Disconnect. |
+| 2.1.2 | 2026-10-10 | `flutter_v2ray_client` vendored and patched — the Stealth notification's own Disconnect button now actually stops the tunnel. |
+| 2.1.1 | 2026-10-10 | Disconnect always sticks (search sessions cancel instantly), engine events scoped per engine (WARP no longer poisoned by stale events), Hysteria2 list fixed via cache schema v3, database freshness (1 h checks + "Last checked"). |
+| 2.1.0 | 2026-10-10 | **Hysteria2** support through the bundled Xray core; DNS-over-tunnel fix (the resolver you pick is exercised through the tunnel); best-combination connect with end-to-end verification. |
+| 2.0.2 | 2026-10-10 | Tap a connected server to disconnect; bigger Stealth pool (~9,400 links measured, Reality tier populated); `stealth.json` private-list support. |
+| 2.0.1 | 2026-10-10 | First-tap disconnect fix, server health + latency sorting, **27-provider DNS selection** with speed test. |
+| 2.0.0 | 2026-10-10 | **Stealth mode launch** with full UI redesign (animated connect button, glass UI), VLESS/Trojan/VMess unlocked, Stealth Auto ladder, manual link import. |
+| 1.x | 2026-10-02 | Free Mode: WARP/WireGuard + OpenVPN, remote server database, Android phone + TV. |
 
-The server list (`servers.json` in the repo root) is loaded from GitHub:
+## Building from source
 
-1. **remote** — `raw.githubusercontent.com/shivytyahoo/IPChakra/main/servers.json` (12-hour cache)
-2. **cache** — the copy saved on the phone
-3. **bundled** — the copy shipped inside the app (`app/assets/servers.json`)
-
-So the moment a new server is added to `servers.json`, it shows up in every
-user's app — no Play Store update required. You can also force an immediate
-refresh from Settings → Server Database → Refresh.
-
-`servers.json` format:
-
-```json
-{
-  "version": 2,
-  "updated": "2026-10-03",
-  "free": [
-    {
-      "id": "warp-1",
-      "name": "WARP Free 1",
-      "flag": "🌐",
-      "type": "free",
-      "protocol": "wireguard",
-      "warp": true,
-      "endpoint": "162.159.192.1:2408",
-      "note": "Cloudflare WARP free network",
-      "enabled": true
-    }
-  ],
-  "chakra": [],
-  "custom": []
-}
-```
-
-- `warp: true` → the app connects with its own free WARP identity.
-- `type: "custom"` with `peer_public_key` + `endpoint` → your own WireGuard VPS.
-- `type: "chakra"` → Chakra Mode (residential rotation) — UI only for now.
-
-## Build
+Requirements: Flutter SDK, JDK 17, Android SDK.
 
 ```bash
+bash tools/restore_binaries.sh   # restores the chunked binary assets (icons, jars, WireGuard Windows libraries)
 cd app
 flutter pub get
-flutter analyze
-flutter build apk --debug        # Android (phone + TV)
-flutter build windows --release  # Windows (needs a Windows host)
+flutter build apk --release
 ```
 
-Android TV: the manifest already has `LEANBACK_LAUNCHER` + a banner, so the
-same APK installs on TV.
+Three plugins are **vendored** under [`packages/`](packages/) (see each package's `PATCHES.md` for the exact changes versus upstream): `wireguard_flutter` (Free-mode notification + Disconnect), `openvpn_flutter`, and `flutter_v2ray_client` (notification Disconnect wiring, reliable stop signalling, connection-state query).
 
-## Project structure
+**Native binaries not stored in git.** A few large prebuilt binaries are deliberately not committed. Restore them from the official upstream packages of the same versions before building:
 
-```
-app/
-  lib/
-    main.dart                 # app entry, 3 tabs
-    core/theme.dart           # dark premium theme
-    core/net.dart             # ping / exit-IP helpers
-    models/vpn_server.dart    # server record
-    services/server_database.dart  # remote → cache → bundled
-    services/warp_service.dart     # free WARP identity
-    services/vpn_controller.dart   # connect/disconnect brain
-    screens/home_screen.dart       # Chakra dial + mode switch
-    screens/servers_screen.dart    # Free / Chakra server lists
-    screens/settings_screen.dart   # database, engine, about
-  assets/servers.json         # bundled fallback list
-servers.json                  # remote database (repo root)
-.github/workflows/build.yml   # Android + Windows CI builds
-```
+- `packages/flutter_v2ray_client/android/libs/libv2ray.aar` and `packages/flutter_v2ray_client/android/src/main/jniLibs/*/libtun2socks.so` — from the `flutter_v2ray_client` **3.5.0** package.
+- `packages/wireguard_flutter/windows/lib/tunnel/arm64/tunnel.dll` and `packages/wireguard_flutter/windows/lib/wireguard/arm64/wireguard.dll` — from the upstream `wireguard_flutter` package (the amd64 Windows binaries are restored by `tools/restore_binaries.sh`).
 
-Made by Shiv 🌀
+## Privacy notes
+
+- IPChakra has no accounts, no analytics and no ads. Server lists are fetched from this repository and public feeds; your chosen DNS provider is the one your queries go to while connected (and the status card proves which one that is).
+- The app does not itself block traffic when a tunnel drops. For OS-level leak protection, Android's **Always-on VPN → "Block connections without VPN"** option is the real kill switch — Settings inside the app links straight to it.
+
+## Project layout
+
+- `app/` — the Flutter application (Android phone/TV, Windows).
+- `packages/` — vendored engine plugins with IPChakra's patches.
+- `servers.json`, `stealth.json` — the live, remotely-updated server database.
+- `tools/` — binary restore tooling.
+- `trial/` — residential-proxy trial infrastructure scripts (for the future Chakra mode).
+
+---
+
+Made with ❤️ by Shiv

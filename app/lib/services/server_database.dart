@@ -5,23 +5,34 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/vpn_server.dart';
 
-/// Server list ka remote database.
+/// The remote server-list database.
 ///
-/// Priority: remote JSON (12 ghante ka cache) -> local cache -> bundled asset.
-/// Matlab: servers.json GitHub pe update hote hi app me naye servers
-/// aa jayenge - app update ki zaroorat nahi.
+/// Priority: remote JSON (1-hour cache) -> local cache -> bundled
+/// asset. The database is loaded at every app start, so with the
+/// 1-hour staleness window an update published to servers.json in
+/// the repository reaches the app on a later launch the same day —
+/// no app update needed.
 class ServerDatabase extends ChangeNotifier {
   static const remoteUrl =
       'https://raw.githubusercontent.com/shivytyahoo/IPChakra/main/servers.json';
   static const _kCache = 'ipchakra_servers_json';
   static const _kCacheTime = 'ipchakra_servers_time';
+  static const _kLastCheck = 'ipchakra_servers_last_check';
 
   List<VpnServer> free = [];
   List<VpnServer> chakra = [];
   List<VpnServer> custom = [];
   int version = 0;
   String updated = '';
+
+  /// The "generated" timestamp inside the JSON, when the publisher
+  /// includes one. Parsed tolerantly: absent in older files.
+  String generated = '';
   String source = 'bundled'; // remote | cache | bundled
+
+  /// When the remote database was last checked — every attempt is
+  /// recorded, success or failure, and persisted across launches.
+  DateTime? lastChecked;
 
   List<VpnServer> get all => [...free, ...chakra, ...custom];
 
@@ -34,11 +45,20 @@ class ServerDatabase extends ChangeNotifier {
 
   Future<void> load({bool forceRefresh = false}) async {
     final prefs = await SharedPreferences.getInstance();
+    final lastCheckMs = prefs.getInt(_kLastCheck);
+    if (lastCheckMs != null) {
+      lastChecked = DateTime.fromMillisecondsSinceEpoch(lastCheckMs);
+    }
     final lastFetch = prefs.getInt(_kCacheTime) ?? 0;
     final stale =
-        DateTime.now().millisecondsSinceEpoch - lastFetch > 12 * 3600 * 1000;
+        DateTime.now().millisecondsSinceEpoch - lastFetch > 1 * 3600 * 1000;
 
     if (forceRefresh || stale) {
+      // Record every remote attempt, success or failure, so Settings
+      // can show when the database was last checked.
+      lastChecked = DateTime.now();
+      await prefs.setInt(
+          _kLastCheck, lastChecked!.millisecondsSinceEpoch);
       try {
         final r = await http
             .get(Uri.parse(remoteUrl))
@@ -77,6 +97,7 @@ class ServerDatabase extends ChangeNotifier {
     final j = jsonDecode(raw) as Map<String, dynamic>;
     version = (j['version'] as num?)?.toInt() ?? 0;
     updated = j['updated']?.toString() ?? '';
+    generated = j['generated']?.toString() ?? '';
     List<VpnServer> list(String k) => ((j[k] as List?) ?? [])
         .map((e) => VpnServer.fromJson(e as Map<String, dynamic>))
         .toList();

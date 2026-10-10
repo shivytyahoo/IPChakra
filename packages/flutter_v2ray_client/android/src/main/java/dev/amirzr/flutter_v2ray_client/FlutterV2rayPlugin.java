@@ -1,0 +1,306 @@
+package dev.amirzr.flutter_v2ray_client;
+
+import android.Manifest;
+import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
+import android.net.VpnService;
+import android.os.Build;
+import android.util.Log;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.core.app.ActivityCompat;
+
+import dev.amirzr.flutter_v2ray_client.v2ray.V2rayController;
+import dev.amirzr.flutter_v2ray_client.v2ray.V2rayReceiver;
+import dev.amirzr.flutter_v2ray_client.v2ray.utils.AppConfigs;
+import dev.amirzr.flutter_v2ray_client.v2ray.utils.LogcatManager;
+
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import io.flutter.embedding.engine.plugins.FlutterPlugin;
+import io.flutter.embedding.engine.plugins.activity.ActivityAware;
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding;
+import io.flutter.plugin.common.EventChannel;
+import io.flutter.plugin.common.MethodChannel;
+import io.flutter.plugin.common.PluginRegistry;
+
+/**
+ * FlutterV2rayPlugin
+ */
+public class FlutterV2rayPlugin implements FlutterPlugin, ActivityAware, PluginRegistry.ActivityResultListener {
+
+    private static final int REQUEST_CODE_VPN_PERMISSION = 24;
+    private static final int REQUEST_CODE_POST_NOTIFICATIONS = 1;
+    private final ExecutorService executor = Executors.newCachedThreadPool();
+
+    private MethodChannel vpnControlMethod;
+    private EventChannel vpnStatusEvent;
+    private EventChannel.EventSink vpnStatusSink;
+    private Activity activity;
+    private Context appContext;
+    private BroadcastReceiver v2rayBroadCastReceiver;
+    private boolean statusReceiverRegistered = false;
+    private MethodChannel.Result pendingResult;
+
+    // IPChakra patch (see PATCHES.md, Patch 2): single, guarded
+    // registration of the connection-info receiver, always on the
+    // application context (see the note in onListen). Registering the
+    // same receiver instance on more than one context would deliver
+    // every status broadcast twice.
+    private void registerStatusReceiver() {
+        if (appContext == null || statusReceiverRegistered) {
+            return;
+        }
+        if (v2rayBroadCastReceiver == null) {
+            v2rayBroadCastReceiver = new V2rayReceiver();
+        }
+        String packageName = appContext.getPackageName();
+        IntentFilter filter = new IntentFilter(packageName + ".V2RAY_CONNECTION_INFO");
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.registerReceiver(v2rayBroadCastReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                appContext.registerReceiver(v2rayBroadCastReceiver, filter);
+            }
+            statusReceiverRegistered = true;
+        } catch (Exception e) {
+            Log.e("FlutterV2rayPlugin", "Failed to register broadcast receiver", e);
+        }
+    }
+
+    private void unregisterStatusReceiver() {
+        if (v2rayBroadCastReceiver == null) {
+            return;
+        }
+        try {
+            appContext.unregisterReceiver(v2rayBroadCastReceiver);
+        } catch (IllegalArgumentException e) {
+            // Receiver was not registered, ignore
+        } catch (Exception e) {
+            // Application context may already be gone during teardown
+        }
+        v2rayBroadCastReceiver = null;
+        statusReceiverRegistered = false;
+    }
+
+    @SuppressLint("DiscouragedApi")
+    @Override
+    public void onAttachedToEngine(@NonNull FlutterPluginBinding binding) {
+        this.appContext = binding.getApplicationContext();
+        vpnControlMethod = new MethodChannel(binding.getBinaryMessenger(), "flutter_v2ray_client");
+        vpnStatusEvent = new EventChannel(binding.getBinaryMessenger(), "flutter_v2ray_client/status");
+
+        vpnStatusEvent.setStreamHandler(new EventChannel.StreamHandler() {
+            @Override
+            public void onListen(Object arguments, EventChannel.EventSink events) {
+                vpnStatusSink = events;
+                V2rayReceiver.vpnStatusSink = vpnStatusSink;
+
+                // Register the BroadcastReceiver now that vpnStatusSink
+                // is available — on the application context, via the
+                // guarded helper (IPChakra patch, Patch 2).
+                registerStatusReceiver();
+            }
+
+            @Override
+            public void onCancel(Object arguments) {
+                if (vpnStatusSink != null)
+                    vpnStatusSink.endOfStream();
+
+                // Unregister the BroadcastReceiver when the stream is canceled
+                unregisterStatusReceiver();
+            }
+        });
+
+        vpnControlMethod.setMethodCallHandler((call, result) -> {
+            switch (call.method) {
+                case "startV2Ray":
+                    AppConfigs.NOTIFICATION_DISCONNECT_BUTTON_NAME = call.argument("notificationDisconnectButtonName");
+                    if (Boolean.TRUE.equals(call.argument("proxy_only"))) {
+                        V2rayController.changeConnectionMode(AppConfigs.V2RAY_CONNECTION_MODES.PROXY_ONLY);
+                    } else {
+                        V2rayController.changeConnectionMode(AppConfigs.V2RAY_CONNECTION_MODES.VPN_TUN);
+                    }
+                    V2rayController.StartV2ray(binding.getApplicationContext(), call.argument("remark"),
+                            call.argument("config"), call.argument("blocked_apps"), call.argument("bypass_subnets"));
+                    result.success(null);
+                    break;
+                case "stopV2Ray":
+                    V2rayController.StopV2ray(binding.getApplicationContext());
+                    result.success(null);
+                    break;
+                case "initializeV2Ray":
+                    String iconResourceName = call.argument("notificationIconResourceName");
+                    String iconResourceType = call.argument("notificationIconResourceType");
+                    V2rayController.init(binding.getApplicationContext(),
+                            binding.getApplicationContext().getResources().getIdentifier(iconResourceName,
+                                    iconResourceType, binding.getApplicationContext().getPackageName()),
+                            "Flutter V2ray");
+                    result.success(null);
+                    break;
+                case "getServerDelay":
+                    executor.submit(() -> {
+                        try {
+                            result.success(
+                                    V2rayController.getV2rayServerDelay(call.argument("config"), call.argument("url")));
+                        } catch (Exception e) {
+                            result.success(-1);
+                        }
+                    });
+                    break;
+                case "getConnectedServerDelay":
+                    executor.submit(() -> {
+                        try {
+                            AppConfigs.DELAY_URL = call.argument("url");
+                            result.success(
+                                    V2rayController.getConnectedV2rayServerDelay(binding.getApplicationContext()));
+                        } catch (Exception e) {
+                            result.success(-1);
+                        }
+                    });
+                    break;
+                case "getCoreVersion":
+                    result.success(V2rayController.getCoreVersion());
+                    break;
+                case "getConnectionState":
+                    // IPChakra patch (see PATCHES.md, Patch 3): a
+                    // synchronous ground-truth query for the app's
+                    // start/resume reconciliation. AppConfigs.V2RAY_STATE
+                    // is kept current in THIS process by the receiver
+                    // V2rayController.init() registers for the
+                    // connection-info broadcasts, so it reflects the
+                    // service process's real state even when a status
+                    // event never reached the Dart EventChannel.
+                    result.success(V2rayController.getConnectionState().name());
+                    break;
+                case "requestPermission":
+                    if (activity == null) {
+                        result.error("NO_ACTIVITY", "Activity is not available for permission request", null);
+                        return;
+                    }
+
+                    // Prevent concurrent permission requests which can lead to a null pendingResult when the
+                    // activity result returns after a lifecycle change or a second request
+                    if (pendingResult != null) {
+                        result.error("ALREADY_ACTIVE", "A permission request is already running", null);
+                        return;
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        if (ActivityCompat.checkSelfPermission(activity,
+                                Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                            ActivityCompat.requestPermissions(activity,
+                                    new String[] { Manifest.permission.POST_NOTIFICATIONS },
+                                    REQUEST_CODE_POST_NOTIFICATIONS);
+                        }
+                    }
+                    final Intent request = VpnService.prepare(activity);
+                    if (request != null) {
+                        pendingResult = result;
+                        activity.startActivityForResult(request, REQUEST_CODE_VPN_PERMISSION);
+                    } else {
+                        result.success(true);
+                    }
+                    break;
+                case "getLogs":
+                    executor.submit(() -> {
+                        try {
+                            String packageName = binding.getApplicationContext().getPackageName();
+                            List<String> logs = LogcatManager.getInstance().getLogs(packageName);
+                            result.success(logs);
+                        } catch (Exception e) {
+                            Log.e("FlutterV2rayPlugin", "Failed to get logs", e);
+                            result.error("LOG_ERROR", "Failed to retrieve logs: " + e.getMessage(), null);
+                        }
+                    });
+                    break;
+                case "clearLogs":
+                    executor.submit(() -> {
+                        try {
+                            boolean success = LogcatManager.getInstance().clearLogs();
+                            result.success(success);
+                        } catch (Exception e) {
+                            Log.e("FlutterV2rayPlugin", "Failed to clear logs", e);
+                            result.error("LOG_ERROR", "Failed to clear logs: " + e.getMessage(), null);
+                        }
+                    });
+                    break;
+                default:
+                    break;
+            }
+        });
+    }
+
+    @Override
+    public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
+        unregisterStatusReceiver();
+        vpnControlMethod.setMethodCallHandler(null);
+        vpnStatusEvent.setStreamHandler(null);
+        executor.shutdown();
+    }
+
+    @Override
+    public void onAttachedToActivity(@NonNull ActivityPluginBinding binding) {
+        activity = binding.getActivity();
+        binding.addActivityResultListener(this);
+        // Register the receiver if vpnStatusSink is already set
+        // (application context, guarded — see registerStatusReceiver).
+        if (vpnStatusSink != null) {
+            V2rayReceiver.vpnStatusSink = vpnStatusSink;
+            registerStatusReceiver();
+        }
+    }
+
+    @Override
+    public void onDetachedFromActivityForConfigChanges() {
+        // No additional cleanup required
+    }
+
+    @Override
+    public void onReattachedToActivityForConfigChanges(@NonNull ActivityPluginBinding binding) {
+        activity = binding.getActivity();
+        binding.addActivityResultListener(this);
+
+        // Re-register the receiver if vpnStatusSink is already set
+        // (application context, guarded — see registerStatusReceiver).
+        if (vpnStatusSink != null) {
+            V2rayReceiver.vpnStatusSink = vpnStatusSink;
+            registerStatusReceiver();
+        }
+    }
+
+    @Override
+    public void onDetachedFromActivity() {
+        // Clear activity and fail any pending permission result to avoid NPEs
+        activity = null;
+        if (pendingResult != null) {
+            pendingResult.error("ACTIVITY_DETACHED", "Activity detached before receiving VPN permission result", null);
+            pendingResult = null;
+        }
+    }
+
+    @Override
+    public boolean onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        if (requestCode != REQUEST_CODE_VPN_PERMISSION) {
+            return false; // Not handled by this plugin
+        }
+
+        MethodChannel.Result result = pendingResult;
+        pendingResult = null;
+
+        if (result == null) {
+            return false; // Nothing to report (possibly after lifecycle change)
+        }
+
+        result.success(resultCode == Activity.RESULT_OK);
+        return true;
+    }
+}

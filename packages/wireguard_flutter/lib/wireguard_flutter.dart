@@ -54,6 +54,11 @@ class WireGuardFlutter extends WireGuardFlutterInterface {
   @override
   Future<void> stopVpn() => _instance.stopVpn();
 
+  /// IPChakra patch (see PATCHES.md, Patch 2).
+  @override
+  Future<void> requestNotificationPermission() =>
+      _instance.requestNotificationPermission();
+
   @override
   Future<void> refreshStage() => _instance.refreshStage();
 
