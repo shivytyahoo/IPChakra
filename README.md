@@ -1,4 +1,23 @@
-# IPChakra
+<p align="center">
+  <img src="assets/ipchakra-icon-512.png" alt="IPChakra logo" width="150">
+</p>
+
+<h1 align="center">IPChakra</h1>
+
+<p align="center">
+  <strong>Free VPN for Android &amp; Android TV — WARP · OpenVPN · Stealth Xray</strong><br>
+  VLESS + Reality · Hysteria2 · Trojan · Shadowsocks — with verified connections,<br>
+  smart DNS escalation, self-healing sessions and zero fake "Connected".
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/release-v2.2.0%20Stealth%20Resilience-6C4CF1" alt="Release v2.2.0">
+  <img src="https://img.shields.io/badge/platform-Android%20%7C%20Android%20TV%20%7C%20Windows-3DDC84" alt="Platforms">
+  <img src="https://img.shields.io/badge/built%20with-Flutter-02569B" alt="Built with Flutter">
+  <img src="https://img.shields.io/badge/price-Free%20forever-success" alt="Free forever">
+</p>
+
+---
 
 A free VPN app for Android phones and Android TV, with a premium interface and three engines under one roof: WireGuard (Cloudflare WARP), OpenVPN, and Xray. IPChakra's speciality is its **Stealth mode** — modern censorship-resistant protocols (VLESS + Reality, Hysteria2, Trojan/TLS, Shadowsocks, VMess) with a connect system that only declares "Connected" after the tunnel has been *proven* to carry traffic with the DNS you chose.
 
