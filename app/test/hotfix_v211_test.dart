@@ -157,8 +157,11 @@ void main() {
       );
     });
 
-    test('the current schema is the Hysteria2-capable one (3)', () {
-      expect(V2RayService.cacheSchemaVersion, 3);
+    test('the current schema is the attributed multi-feed one (4)', () {
+      // Was 3 in the v2.1.1–v2.2.0 releases (the Hysteria2-capable
+      // schema); v2.3.0 bumped it to 4 for per-feed attribution and
+      // the five new feeds, so v3 caches are discarded once.
+      expect(V2RayService.cacheSchemaVersion, 4);
     });
   });
 
@@ -294,8 +297,8 @@ void main() {
     });
 
     test('the recorded build matches this release', () {
-      expect(kAppVersionName, '2.2.0');
-      expect(kAppBuildNumber, 11);
+      expect(kAppVersionName, '2.3.1');
+      expect(kAppBuildNumber, 13);
     });
   });
 }

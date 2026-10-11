@@ -7,6 +7,7 @@ import '../core/theme.dart';
 import '../models/vpn_server.dart';
 import '../services/health_service.dart';
 import '../services/server_database.dart';
+import '../services/share_service.dart';
 import '../services/v2ray_service.dart';
 import '../services/vpn_controller.dart';
 import '../widgets/animated_background.dart';
@@ -313,6 +314,16 @@ class _HomeScreenState extends State<HomeScreen>
                     _attemptLogCard(),
                     const SizedBox(height: 18),
                     _infoCard(),
+                    if (connected && vpn.server != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: TextButton.icon(
+                          icon: const Icon(Icons.share, size: 16),
+                          label: const Text('Share this server'),
+                          onPressed: () =>
+                              showServerShareSheet(context, vpn.server!),
+                        ),
+                      ),
                     const SizedBox(height: 14),
                     _quickCard(),
                     AnimatedSwitcher(

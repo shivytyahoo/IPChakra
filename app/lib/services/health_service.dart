@@ -186,16 +186,30 @@ class HealthService extends ChangeNotifier {
       case 'mirror':
         return _mirrorTarget(s);
       case 'v2ray':
+      case 'snsub':
+      case 'au1rxx':
+      case 'epodonios':
+      case 'eternity':
+      case 'submerge':
+      case 'pawdroid':
+      case 'matin':
+      case 'nomorewalls':
+      case 'barryfar':
       case 'custom':
       case 'private':
-        // Stealth links (public feed 'v2ray', user-imported 'custom'
+        // Stealth links (the public feeds, user-imported 'custom'
         // and private-feed 'private') can be any scheme — ss, vless,
         // trojan or vmess — so resolve the probe target with the
         // general stealth parser.
         final t = _parseLinkTarget(s.shareLink);
         return t == null ? null : (t.$1, t.$2, false);
       default:
-        return null;
+        // Any other source that carries a share link — the user's
+        // own subscriptions (v2.3.1), whose source is the name they
+        // chose — resolves exactly like the enumerated stealth
+        // sources. Sources without a link stay unresolvable.
+        final t = _parseLinkTarget(s.shareLink);
+        return t == null ? null : (t.$1, t.$2, false);
     }
   }
 
@@ -379,6 +393,33 @@ List<VpnServer> sortByHealthAndLatency(
     return a.$3.compareTo(b.$3);
   });
   return [for (final e in decorated) e.$4];
+}
+
+/// The fastest server in [servers] according to [health]: the
+/// working server with the lowest speed (measured probe latency,
+/// falling back to the source-reported ping — the same ordering
+/// [sortByHealthAndLatency] uses). A working server with no speed
+/// information is only ever the fallback when no measured working
+/// server exists. Returns null when no server in the group is
+/// known to be working (unchecked and dead servers do not count).
+/// Pure — unit-tested.
+VpnServer? pickFastestInGroup(List<VpnServer> servers, HealthService health) {
+  VpnServer? bestMeasured;
+  int? bestSpeed;
+  VpnServer? bestUnmeasured;
+  for (final s in servers) {
+    if (health.isWorking(s.id) != true) continue;
+    final speed = health.latencyOf(s.id) ?? s.pingMs;
+    if (speed == null) {
+      bestUnmeasured ??= s;
+      continue;
+    }
+    if (bestSpeed == null || speed < bestSpeed) {
+      bestSpeed = speed;
+      bestMeasured = s;
+    }
+  }
+  return bestMeasured ?? bestUnmeasured;
 }
 
 /// Drop the servers [health] has marked dead — unless every server is

@@ -7,6 +7,7 @@ import 'core/theme.dart';
 import 'services/health_service.dart';
 import 'services/ovpn_mirror_service.dart';
 import 'services/server_database.dart';
+import 'services/user_lists_service.dart';
 import 'services/v2ray_service.dart';
 import 'services/vpnbook_service.dart';
 import 'services/vpngate_service.dart';
@@ -36,6 +37,7 @@ class _IPChakraAppState extends State<IPChakraApp>
   late final V2RayService v2ray;
   late final HealthService health;
   late final WarpService warp;
+  late final UserListsService userLists;
   late final VpnController vpn;
   bool _loading = true;
   int _tab = 0;
@@ -52,7 +54,8 @@ class _IPChakraAppState extends State<IPChakraApp>
     v2ray = V2RayService();
     health = HealthService();
     warp = WarpService();
-    vpn = VpnController(warp);
+    userLists = UserListsService();
+    vpn = VpnController(warp, userLists: userLists);
     _boot();
   }
 
@@ -70,6 +73,7 @@ class _IPChakraAppState extends State<IPChakraApp>
     } catch (_) {
       // WARP retries later; let the app open.
     }
+    unawaited(userLists.load());
     unawaited(vpngate.load());
     unawaited(vpnbook.load());
     unawaited(mirror.load());
@@ -136,6 +140,7 @@ class _IPChakraAppState extends State<IPChakraApp>
                     mirror: mirror,
                     v2ray: v2ray,
                     health: health,
+                    userLists: userLists,
                     onGoHome: () => setState(() => _tab = 0),
                   ),
                   SettingsScreen(db: db, vpn: vpn),

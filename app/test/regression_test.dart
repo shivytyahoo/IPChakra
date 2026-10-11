@@ -58,9 +58,10 @@ void main() {
     // A plain tier-sort + take() would let whichever tier floods the
     // feeds occupy the whole cap and starve the others out — but the
     // Stealth Auto ladder needs every tier present. The cap must give
-    // every tier its guaranteed share (v2.1.0 quotas, cap 450:
-    // Reality 170 / Hysteria2 50 / TLS 100 / Shadowsocks 80 /
-    // VMess 50).
+    // every tier its guaranteed share (v2.3.0 quotas, cap 600:
+    // Reality 200 / Hysteria2 60 / TLS 150 / Shadowsocks 110 /
+    // VMess 80 — Reality never below its 175 floor, Hysteria2 never
+    // below its 45 floor).
     final svc = V2RayService();
     final servers = <VpnServer>[];
     for (var i = 0; i < 250; i++) {
@@ -86,12 +87,12 @@ void main() {
       }
     }
     final capped = V2RayService.debugCapByTier(servers);
-    expect(capped.length, 450);
-    expect(capped.where((s) => s.tier == 'Reality').length, 170);
-    expect(capped.where((s) => s.tier == 'Hysteria2').length, 50);
-    expect(capped.where((s) => s.tier == 'TLS').length, 100);
-    expect(capped.where((s) => s.tier == 'Shadowsocks').length, 80);
-    expect(capped.where((s) => s.tier == 'VMess').length, 50);
+    expect(capped.length, 600);
+    expect(capped.where((s) => s.tier == 'Reality').length, 200);
+    expect(capped.where((s) => s.tier == 'Hysteria2').length, 60);
+    expect(capped.where((s) => s.tier == 'TLS').length, 150);
+    expect(capped.where((s) => s.tier == 'Shadowsocks').length, 110);
+    expect(capped.where((s) => s.tier == 'VMess').length, 80);
     // Still grouped by tier: Reality first, VMess last.
     final lastReality = capped.lastIndexWhere((s) => s.tier == 'Reality');
     final firstHy2 = capped.indexWhere((s) => s.tier == 'Hysteria2');

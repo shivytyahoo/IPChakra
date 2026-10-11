@@ -13,8 +13,10 @@ import '../models/vpn_server.dart';
 import 'dns_combo.dart';
 import 'dns_service.dart';
 import 'hysteria_config.dart';
+import 'ipv6_hardening.dart';
 import 'stealth_link.dart';
 import 'tunnel_verifier.dart';
+import 'user_lists_service.dart';
 import 'vpngate_service.dart';
 import 'warp_service.dart';
 
@@ -239,6 +241,12 @@ class VpnController extends ChangeNotifier {
   late final OpenVPN _ovpn;
   late final V2ray _v2ray;
   final WarpService warp;
+
+  /// The user's favourites/recents store, when the app wired one
+  /// in. Successful (verified) connections are recorded into it so
+  /// the Servers screen can offer a Recents shortlist. Optional:
+  /// tests and headless uses run without it.
+  final UserListsService? userLists;
 
   VpnState state = VpnState.disconnected;
   AppMode mode = AppMode.free;
@@ -580,8 +588,11 @@ class VpnController extends ChangeNotifier {
   /// inject a fake WireGuard engine because the plugin's desktop
   /// implementation shells out to `sudo wg`, which no test host
   /// provides. Production always uses the plugin's real engine.
-  VpnController(this.warp, {WireGuardFlutterInterface? wgEngine})
-      : _wg = wgEngine ?? WireGuardFlutter.instance {
+  VpnController(
+    this.warp, {
+    WireGuardFlutterInterface? wgEngine,
+    this.userLists,
+  }) : _wg = wgEngine ?? WireGuardFlutter.instance {
     _ovpn = OpenVPN(onVpnStageChanged: _onOvpnStage);
     _v2ray = V2ray(onStatusChanged: _onV2rayStatus);
   }
@@ -783,7 +794,22 @@ class VpnController extends ChangeNotifier {
     if (engine != null) _selfStopEchoes.remove(engine);
     connectedAt ??= DateTime.now();
     _setState(VpnState.connected);
+    _recordSuccessfulConnect();
     unawaited(_refreshIp());
+  }
+
+  /// Note a verified successful connection in the user's recents
+  /// (the Servers screen shortlist). Called only on paths that
+  /// actually establish a session — a native connected event that
+  /// passed the guard, or a stealth combination that passed
+  /// verification and the stability gate — never for an attempt
+  /// that merely started. The store deduplicates and caps the
+  /// list; persistence is its own concern.
+  void _recordSuccessfulConnect() {
+    final server = currentServer;
+    final lists = userLists;
+    if (server == null || lists == null) return;
+    unawaited(lists.recordConnect(server));
   }
 
   /// Test-only seam: simulate a native "connected" event arriving
@@ -993,6 +1019,7 @@ class VpnController extends ChangeNotifier {
     effectiveDns = dns;
     connectedAt ??= DateTime.now();
     _setState(VpnState.connected);
+    _recordSuccessfulConnect();
     _startWatchdog();
   }
 
@@ -1785,6 +1812,10 @@ class VpnController extends ChangeNotifier {
     if (config == null || config.isEmpty || !config.contains('<ca>')) {
       throw Exception('Is server ka OpenVPN config nahi mila.');
     }
+    // IPv6 hardening (v2.3.1): the wrapped config instructs
+    // ics-openvpn to block IPv6 inside the tunnel, so IPv6 traffic
+    // cannot slip around an IPv4-only OpenVPN tunnel.
+    config = hardenOpenVpnConfig(config);
     // Credentials plugin ke documented username/password params se jaate hain.
     // VPNGate: vpn/vpn. VPNBook: vpnbook + weekly password (server object me).
     // Mirror: auth nahi chahiye. (VPNBook config me inline creds bhi embedded
@@ -1861,9 +1892,16 @@ class VpnController extends ChangeNotifier {
       // whose whole point is the absence of a custom treatment:
       // the configuration is stripped back and the plugin/core
       // default DNS handling applies instead.
-      config: DnsService.isDefaultDns(attemptDns)
-          ? DnsService.defaultDnsConfig(config)
-          : DnsService.applyStealthDns(config, dnsServers),
+      // IPv6 hardening (v2.3.1): the core's direct (freedom)
+      // egress and its DNS resolution are pinned to IPv4, so
+      // nothing the core originates bypasses the tunnel over the
+      // phone's native IPv6; the plugin's TUN already sinkholes
+      // IPv6 for app traffic. Applied uniformly, Tier 3 included.
+      config: hardenXrayConfig(
+        DnsService.isDefaultDns(attemptDns)
+            ? DnsService.defaultDnsConfig(config)
+            : DnsService.applyStealthDns(config, dnsServers),
+      ),
       proxyOnly: false,
     );
   }
@@ -1900,6 +1938,10 @@ class VpnController extends ChangeNotifier {
       final privBytes = await kp.extractPrivateKeyBytes();
       customClientPubKey = base64Encode(pub.bytes);
       endpoint = server.endpoint!;
+      // IPv6 hardening (v2.3.1): AllowedIPs routes IPv6 into the
+      // tunnel too (see kWireGuardAllowedIps). This generated
+      // config carries no IPv6 address, so IPv6 dies inside the
+      // tunnel instead of leaking around it.
       conf = '[Interface]\n'
           'PrivateKey = ${base64Encode(privBytes)}\n'
           'Address = 10.8.0.2/32\n'
@@ -1907,7 +1949,7 @@ class VpnController extends ChangeNotifier {
           '\n'
           '[Peer]\n'
           'PublicKey = ${server.peerPublicKey}\n'
-          'AllowedIPs = 0.0.0.0/0\n'
+          'AllowedIPs = $kWireGuardAllowedIps\n'
           'Endpoint = $endpoint\n'
           'PersistentKeepalive = 25\n';
     } else {

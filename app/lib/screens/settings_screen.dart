@@ -121,6 +121,21 @@ class SettingsScreen extends StatelessWidget {
                     style: TextStyle(color: Colors.white54, fontSize: 12),
                   ),
                 ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
+                  child: Text(
+                    'IPv6: the configurations IPChakra builds guard '
+                    'IPv6 as well — OpenVPN connections block it '
+                    'inside the tunnel, WireGuard routes it into the '
+                    'tunnel (carried end to end when your free '
+                    'identity has an IPv6 address, stopped there '
+                    'when it does not), and Stealth tunnels sinkhole '
+                    'it while the core\'s own direct traffic stays '
+                    'on IPv4 — so IPv6 cannot slip around an '
+                    'IPv4-only tunnel.',
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
                   child: Align(
@@ -167,7 +182,7 @@ class SettingsScreen extends StatelessWidget {
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
                   ),
                   subtitle: Text(
-                    'Version 2.2.0\n\n'
+                    'Version 2.3.1\n\n'
                     'Free Mode: unlimited fast VPN.\n'
                     'Stealth Mode: Reality, Hysteria2, TLS and '
                     'Shadowsocks servers that stay working on '

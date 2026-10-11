@@ -16,6 +16,7 @@ import 'package:ipchakra/screens/servers_screen.dart';
 import 'package:ipchakra/services/health_service.dart';
 import 'package:ipchakra/services/ovpn_mirror_service.dart';
 import 'package:ipchakra/services/server_database.dart';
+import 'package:ipchakra/services/user_lists_service.dart';
 import 'package:ipchakra/services/v2ray_service.dart';
 import 'package:ipchakra/services/vpn_controller.dart';
 import 'package:ipchakra/services/vpnbook_service.dart';
@@ -32,6 +33,7 @@ class _Rig {
   final mirror = OvpnMirrorService();
   final v2ray = V2RayService();
   final health = HealthService();
+  final userLists = UserListsService();
   late final vpn = VpnController(warp);
 }
 
@@ -225,6 +227,7 @@ void main() {
       mirror: rig.mirror,
       v2ray: rig.v2ray,
       health: rig.health,
+      userLists: rig.userLists,
       onGoHome: () {},
     )));
     await _runSeconds(tester, 5);
@@ -256,6 +259,7 @@ void main() {
       mirror: rig.mirror,
       v2ray: rig.v2ray,
       health: rig.health,
+      userLists: rig.userLists,
       onGoHome: () {},
     )));
     await _runSeconds(tester, 5);

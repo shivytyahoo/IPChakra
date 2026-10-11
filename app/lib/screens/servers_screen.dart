@@ -9,6 +9,8 @@ import '../models/vpn_server.dart';
 import '../services/health_service.dart';
 import '../services/ovpn_mirror_service.dart';
 import '../services/server_database.dart';
+import '../services/share_service.dart';
+import '../services/user_lists_service.dart';
 import '../services/v2ray_service.dart';
 import '../services/vpnbook_service.dart';
 import '../services/vpn_controller.dart';
@@ -24,6 +26,7 @@ class ServersScreen extends StatefulWidget {
   final OvpnMirrorService mirror;
   final V2RayService v2ray;
   final HealthService health;
+  final UserListsService userLists;
   final VoidCallback onGoHome;
 
   const ServersScreen({
@@ -35,6 +38,7 @@ class ServersScreen extends StatefulWidget {
     required this.mirror,
     required this.v2ray,
     required this.health,
+    required this.userLists,
     required this.onGoHome,
   });
 
@@ -46,8 +50,17 @@ class ServersScreenState extends State<ServersScreen> {
   String _query = '';
 
   /// Active Stealth tier filter: 'All', 'Reality', 'Hysteria2',
-  /// 'TLS', 'Shadowsocks', 'Custom' or 'Private'.
+  /// 'TLS', 'Shadowsocks', 'Custom', 'Private', 'Favourites' or
+  /// 'Recent'.
   String _stealthFilter = 'All';
+
+  /// Active list filter on the Free tab: 'All', 'Favourites' or
+  /// 'Recent'.
+  String _freeFilter = 'All';
+
+  /// Active list filter on the OpenVPN tab: 'All', 'Favourites' or
+  /// 'Recent'.
+  String _ovpnFilter = 'All';
 
   Timer? _healthDebounce;
 
@@ -117,6 +130,13 @@ class ServersScreenState extends State<ServersScreen> {
       widget.v2ray.load(forceRefresh: true),
     ]);
     await widget.health.checkAll(_allServers());
+    // A complete refresh has just rebuilt every source list, so
+    // this is the one moment the full id universe is known:
+    // favourites/recents whose servers are genuinely gone from the
+    // pool are dropped silently here (and only here — a partial
+    // load must never prune an id whose source has not loaded yet).
+    await widget.userLists
+        .pruneTo(_allServers().map((s) => s.id).toSet());
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -215,26 +235,45 @@ class ServersScreenState extends State<ServersScreen> {
 
   // ── Free (WARP) ───────────────────────────────────────────────
   Widget _freeList() {
-    final servers = widget.db.free;
-    if (servers.isEmpty) {
-      return ListView(
-        children: const [
-          SizedBox(height: 80),
-          Center(
-            child: Text(
-              'No free servers were found.\nPull down to refresh.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white54),
+    return ListenableBuilder(
+      listenable: widget.userLists,
+      builder: (context, _) {
+        final all = widget.db.free;
+        if (all.isEmpty) {
+          return ListView(
+            children: const [
+              SizedBox(height: 80),
+              Center(
+                child: Text(
+                  'No free servers were found.\nPull down to refresh.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white54),
+                ),
+              ),
+            ],
+          );
+        }
+        final List<VpnServer> servers = switch (_freeFilter) {
+          'Favourites' =>
+            all.where((s) => widget.userLists.isFavourite(s.id)).toList(),
+          'Recent' => _recentOrdered(all),
+          _ => all,
+        };
+        return ListView(
+          padding: const EdgeInsets.all(12),
+          children: [
+            _listFilterChips(
+              current: _freeFilter,
+              onChanged: (v) => setState(() => _freeFilter = v),
             ),
-          ),
-        ],
-      );
-    }
-    return ListView.builder(
-      padding: const EdgeInsets.all(12),
-      itemCount: servers.length,
-      itemBuilder: (context, i) =>
-          _FadeIn(index: i, child: _warpCard(servers[i])),
+            if (servers.isEmpty)
+              _emptyFilterText(_freeFilter)
+            else
+              for (var i = 0; i < servers.length; i++)
+                _FadeIn(index: i, child: _warpCard(servers[i])),
+          ],
+        );
+      },
     );
   }
 
@@ -282,15 +321,23 @@ class ServersScreenState extends State<ServersScreen> {
                 fontSize: 12,
               ),
             ),
-            trailing: isCurrent
-                ? const Chip(
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _favButton(s),
+                _shareButton(s),
+                if (isCurrent)
+                  const Chip(
                     label: Text('Connected'),
                     backgroundColor: ChakraTheme.green,
                   )
-                : ElevatedButton(
+                else
+                  ElevatedButton(
                     onPressed: () => _connectTo(s),
                     child: const Text('Connect'),
                   ),
+              ],
+            ),
           ),
         );
       },
@@ -305,7 +352,10 @@ class ServersScreenState extends State<ServersScreen> {
         listenable: widget.vpnbook,
         builder: (context, _) => ListenableBuilder(
           listenable: widget.mirror,
-          builder: (context, _) => _openvpnBody(),
+          builder: (context, _) => ListenableBuilder(
+            listenable: widget.userLists,
+            builder: (context, _) => _openvpnBody(),
+          ),
         ),
       ),
     );
@@ -337,9 +387,32 @@ class ServersScreenState extends State<ServersScreen> {
         ],
       );
     }
+    final chips = _listFilterChips(
+      current: _ovpnFilter,
+      onChanged: (v) => setState(() => _ovpnFilter = v),
+    );
+    if (_ovpnFilter == 'Recent') {
+      // Recents are a flat shortlist in recency order — grouping by
+      // country would bury the order the user cares about.
+      final recents = _recentOrdered(all);
+      return ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          chips,
+          if (recents.isEmpty)
+            _emptyFilterText('Recent')
+          else
+            for (var i = 0; i < recents.length; i++)
+              _FadeIn(index: i, child: _serverRow(recents[i])),
+        ],
+      );
+    }
+    final pool = _ovpnFilter == 'Favourites'
+        ? all.where((s) => widget.userLists.isFavourite(s.id)).toList()
+        : all;
     // Group by country.
     final groups = <String, List<VpnServer>>{};
-    for (final s in all) {
+    for (final s in pool) {
       groups.putIfAbsent(s.country, () => []).add(s);
     }
     final q = _query.trim().toLowerCase();
@@ -355,15 +428,18 @@ class ServersScreenState extends State<ServersScreen> {
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
+        chips,
         _searchBox('Search by country… (for example India, Japan)'),
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
           child: Text(
-            '${all.length} servers • ${groups.length} countries • VPNGate + VPNBook + Mirror',
+            '${pool.length} servers • ${groups.length} countries • VPNGate + VPNBook + Mirror',
             style: const TextStyle(color: Colors.white38, fontSize: 11),
           ),
         ),
         _healthSummary(),
+        if (_ovpnFilter == 'Favourites' && pool.isEmpty)
+          _emptyFilterText('Favourites'),
         for (var i = 0; i < filtered.length; i++)
           _FadeIn(
             index: i,
@@ -382,6 +458,14 @@ class ServersScreenState extends State<ServersScreen> {
         return all.where((s) => s.source == 'custom').toList();
       case 'Private':
         return all.where((s) => s.source == 'private').toList();
+      case 'Favourites':
+        return all
+            .where((s) => widget.userLists.isFavourite(s.id))
+            .toList();
+      case 'Recent':
+        // Order is applied at render time (recency order); the
+        // membership is the full list.
+        return all;
       case 'All':
         return all;
       default:
@@ -500,6 +584,8 @@ class ServersScreenState extends State<ServersScreen> {
       'Shadowsocks',
       'Custom',
       'Private',
+      'Favourites',
+      'Recent',
     ];
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
@@ -574,9 +660,175 @@ class ServersScreenState extends State<ServersScreen> {
     ).showSnackBar(const SnackBar(content: Text('Imported server removed.')));
   }
 
+  /// "Add subscription" dialog: the user names their own
+  /// subscription and pastes its URL. The service validates both,
+  /// fetches immediately, and merges the servers into the Stealth
+  /// list under the chosen name.
+  Future<void> _showAddSubscriptionDialog() async {
+    final nameController = TextEditingController();
+    final urlController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Add subscription'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Name',
+                  hintText: 'For example: My provider',
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: urlController,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  labelText: 'Subscription URL',
+                  hintText: 'https://…',
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Your subscription is fetched now and refreshed '
+                'together with the built-in lists. Its servers '
+                'appear in the Stealth list under this name.',
+                style: TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Add'),
+            ),
+          ],
+        );
+      },
+    );
+    final name = nameController.text;
+    final url = urlController.text;
+    nameController.dispose();
+    urlController.dispose();
+    if (confirmed != true || !mounted) return;
+    final error =
+        await widget.v2ray.addSubscription(name: name, url: url);
+    if (!mounted) return;
+    if (error != null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+    final addedName = name.trim();
+    final count = widget.v2ray.subscriptionServerCount(addedName);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          count == 0
+              ? 'Subscription added. No servers were fetched yet — '
+                  'it will retry on the next refresh.'
+              : 'Subscription added — $count servers.',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _removeSubscription(String name) async {
+    await widget.v2ray.removeSubscription(name);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Subscription removed.')),
+    );
+  }
+
+  /// The user's subscriptions, one row each: name, server count,
+  /// the traffic/expiry line when the provider reported one, and
+  /// an honest note when the last refresh failed (the pool keeps
+  /// serving the last good list meanwhile).
+  Widget _subscriptionsBlock(V2RayService v) {
+    if (v.subscriptions.isEmpty) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: ChakraTheme.card,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(
+        children: [
+          for (final sub in v.subscriptions)
+            Builder(
+              builder: (context) {
+                final status = v.statusOf(sub.name);
+                final userinfoLine = status.userinfo?.describe() ?? '';
+                return ListTile(
+                  dense: true,
+                  leading: const Icon(
+                    Icons.rss_feed,
+                    color: ChakraTheme.cyan,
+                    size: 20,
+                  ),
+                  title: Text(
+                    sub.name,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${v.subscriptionServerCount(sub.name)} servers',
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 11,
+                        ),
+                      ),
+                      if (userinfoLine.isNotEmpty)
+                        Text(
+                          userinfoLine,
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 11,
+                          ),
+                        ),
+                      if (status.refreshFailed)
+                        const Text(
+                          'Last refresh failed — showing the last '
+                          'good list',
+                          style: TextStyle(
+                            color: Colors.redAccent,
+                            fontSize: 11,
+                          ),
+                        ),
+                    ],
+                  ),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline, size: 20),
+                    tooltip: 'Remove subscription',
+                    color: Colors.white54,
+                    onPressed: () => _removeSubscription(sub.name),
+                  ),
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _stealthList() {
     return ListenableBuilder(
-      listenable: widget.v2ray,
+      listenable: Listenable.merge([widget.v2ray, widget.userLists]),
       builder: (context, _) {
         final v = widget.v2ray;
         if (v.loading && v.servers.isEmpty) {
@@ -624,6 +876,12 @@ class ServersScreenState extends State<ServersScreen> {
                 ),
               ),
               IconButton(
+                icon: const Icon(Icons.rss_feed),
+                tooltip: 'Add subscription',
+                color: ChakraTheme.cyan,
+                onPressed: _showAddSubscriptionDialog,
+              ),
+              IconButton(
                 icon: const Icon(Icons.add_link),
                 tooltip: 'Import stealth server',
                 color: ChakraTheme.cyan,
@@ -634,26 +892,35 @@ class ServersScreenState extends State<ServersScreen> {
           _healthSummary(),
           _stealthAutoCard(),
           _stealthChips(),
+          _subscriptionsBlock(v),
         ];
         if (_stealthFilter != 'All') {
-          // Flat list of the servers matching the active filter,
-          // fastest first (shared ordering helper).
-          final matching =
-              sortByHealthAndLatency(_filteredStealth(v.servers), widget.health);
+          // Flat list of the servers matching the active filter.
+          // Tier filters keep the shared fastest-first ordering;
+          // Recent is shown in recency order instead.
+          final matching = _stealthFilter == 'Recent'
+              ? _recentOrdered(_filteredStealth(v.servers))
+              : sortByHealthAndLatency(
+                  _filteredStealth(v.servers),
+                  widget.health,
+                );
           return ListView(
             padding: const EdgeInsets.all(12),
             children: [
               ...header,
               if (matching.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Center(
-                    child: Text(
-                      'No servers match this filter.',
-                      style: TextStyle(color: Colors.white54),
-                    ),
-                  ),
-                )
+                (_stealthFilter == 'Favourites' ||
+                        _stealthFilter == 'Recent')
+                    ? _emptyFilterText(_stealthFilter)
+                    : const Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Center(
+                          child: Text(
+                            'No servers match this filter.',
+                            style: TextStyle(color: Colors.white54),
+                          ),
+                        ),
+                      )
               else
                 for (var i = 0; i < matching.length; i++)
                   _FadeIn(index: i, child: _serverRow(matching[i])),
@@ -689,6 +956,133 @@ class ServersScreenState extends State<ServersScreen> {
   }
 
   // ── shared widgets ──────────────────────────────────────────────
+
+  /// The All / Favourites / Recent filter chips used by the Free
+  /// and OpenVPN tabs (the Stealth tab has its own chip row).
+  Widget _listFilterChips({
+    required String current,
+    required ValueChanged<String> onChanged,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        children: [
+          for (final f in const ['All', 'Favourites', 'Recent'])
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ChoiceChip(
+                label: Text(f),
+                selected: current == f,
+                onSelected: (selected) {
+                  if (selected) onChanged(f);
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// The servers from [pool] that appear in the user's recents, in
+  /// recency order (newest first). Ids whose servers are not in
+  /// [pool] (another tab, or gone) are simply skipped.
+  List<VpnServer> _recentOrdered(List<VpnServer> pool) {
+    final byId = {for (final s in pool) s.id: s};
+    return [
+      for (final id in widget.userLists.recents)
+        if (byId[id] != null) byId[id]!,
+    ];
+  }
+
+  /// Empty-state text for a Favourites/Recent filter with nothing
+  /// in it yet.
+  Widget _emptyFilterText(String filter) {
+    final text = filter == 'Favourites'
+        ? 'No favourites yet.\nTap the star on any server to add it here.'
+        : 'No recent connections yet.\nServers you connect to will appear here.';
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Center(
+        child: Text(
+          text,
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: Colors.white54),
+        ),
+      ),
+    );
+  }
+
+  /// The star toggle on a server row: filled amber when the server
+  /// is a favourite, an outline otherwise. Persists by stable id.
+  Widget _favButton(VpnServer s) {
+    return ListenableBuilder(
+      listenable: widget.userLists,
+      builder: (context, _) {
+        final fav = widget.userLists.isFavourite(s.id);
+        return IconButton(
+          icon: Icon(
+            fav ? Icons.star : Icons.star_border,
+            size: 20,
+            color: fav ? Colors.amber : Colors.white54,
+          ),
+          tooltip: fav ? 'Remove from favourites' : 'Add to favourites',
+          onPressed: () => widget.userLists.toggleFavourite(s.id),
+        );
+      },
+    );
+  }
+
+  /// The share button on a server row: opens the share sheet
+  /// (share / copy / QR for share links).
+  Widget _shareButton(VpnServer s) {
+    return IconButton(
+      icon: const Icon(Icons.share, size: 19),
+      tooltip: 'Share server',
+      color: Colors.white54,
+      onPressed: () => showServerShareSheet(context, s),
+    );
+  }
+
+  /// Connect the fastest working server in a country group, using
+  /// the health/latency data the list already sorts by. When no
+  /// server in the group has been measured working yet, say so
+  /// instead of guessing.
+  Future<void> _connectFastest(
+    String country,
+    List<VpnServer> servers,
+  ) async {
+    final pick = pickFastestInGroup(servers, widget.health);
+    if (pick == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'No working server has been measured in this country '
+            'yet — the health check may still be running.',
+          ),
+        ),
+      );
+      return;
+    }
+    await _connectTo(pick);
+  }
+
+  /// The "Connect fastest" row at the top of a country group.
+  Widget _fastestTile(String country, List<VpnServer> servers) {
+    return ListTile(
+      dense: true,
+      leading: const Icon(Icons.bolt, color: Colors.amber, size: 20),
+      title: const Text(
+        'Connect fastest',
+        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+      ),
+      subtitle: Text(
+        'The lowest-latency working server in $country',
+        style: const TextStyle(color: Colors.white54, fontSize: 11),
+      ),
+      onTap: () => _connectFastest(country, servers),
+    );
+  }
 
   /// Server health badge: 🟢 working / 🔴 dead / ⚪ checking.
   Widget _healthBadge(VpnServer s) {
@@ -794,6 +1188,15 @@ class ServersScreenState extends State<ServersScreen> {
     'vpnbook': 'VPNBook',
     'mirror': 'Mirror',
     'v2ray': 'Stealth',
+    'snsub': 'sNSub',
+    'au1rxx': 'Au1rxx',
+    'epodonios': 'Epodonios',
+    'eternity': 'Eternity',
+    'submerge': 'Sub Merge',
+    'pawdroid': 'Pawdroid',
+    'matin': 'MatinGhanbari',
+    'nomorewalls': 'NoMoreWalls',
+    'barryfar': 'Barry-Far',
     'custom': 'Imported',
     'private': 'Private',
   };
@@ -884,7 +1287,10 @@ class ServersScreenState extends State<ServersScreen> {
           '${servers.length} servers',
           style: const TextStyle(color: Colors.white54, fontSize: 12),
         ),
-        children: [for (final srv in servers) _serverRow(srv)],
+        children: [
+          _fastestTile(country, servers),
+          for (final srv in servers) _serverRow(srv),
+        ],
       ),
     );
   }
@@ -931,6 +1337,8 @@ class ServersScreenState extends State<ServersScreen> {
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                _shareButton(s),
+                _favButton(s),
                 if (isCurrent)
                   const Chip(
                     label: Text('Connected', style: TextStyle(fontSize: 11)),

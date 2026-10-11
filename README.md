@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-v2.2.0%20Stealth%20Resilience-6C4CF1" alt="Release v2.2.0">
+  <img src="https://img.shields.io/badge/release-v2.3.1%20Batch%20B-6C4CF1" alt="Release v2.3.1">
   <img src="https://img.shields.io/badge/platform-Android%20%7C%20Android%20TV%20%7C%20Windows-3DDC84" alt="Platforms">
   <img src="https://img.shields.io/badge/built%20with-Flutter-02569B" alt="Built with Flutter">
   <img src="https://img.shields.io/badge/price-Free%20forever-success" alt="Free forever">
@@ -21,7 +21,7 @@
 
 A free VPN app for Android phones and Android TV, with a premium interface and three engines under one roof: WireGuard (Cloudflare WARP), OpenVPN, and Xray. IPChakra's speciality is its **Stealth mode** — modern censorship-resistant protocols (VLESS + Reality, Hysteria2, Trojan/TLS, Shadowsocks, VMess) with a connect system that only declares "Connected" after the tunnel has been *proven* to carry traffic with the DNS you chose.
 
-**Current release: v2.2.0 "Stealth Resilience"**
+**Current release: v2.3.1 "Batch B"**
 
 Made with ❤️ by Shiv
 
@@ -56,7 +56,9 @@ The server lists live in this repository and update **without an app update**:
 
 | Version | Date | Highlights |
 |---|---|---|
-| **2.2.0** | 2026-10-10 | **Stealth Resilience.** DNS escalation tiers with the server fixed, stability gate before "Connected", watchdog self-healing with a Reconnecting state, live English attempt log, Settings "Privacy & Leak Protection" note with a shortcut to Android's VPN settings. |
+| **2.3.1** | 2026-10-11 | **Batch B.** Favourites, recents and fastest-by-country picks; subscription import by URL; config sharing with QR codes; IPv6 leak hardening across all three engines. |
+| 2.3.0 | 2026-10-11 | **More Servers.** Five new Stealth feeds (NoMoreWalls, MatinGhanbari, Au1rxx, sNSub, Barry-Far) — 22,476 unique servers measured live, a pool of 600 with quality-first selection and per-source labels. |
+| 2.2.0 | 2026-10-10 | **Stealth Resilience.** DNS escalation tiers with the server fixed, stability gate before "Connected", watchdog self-healing with a Reconnecting state, live English attempt log, Settings "Privacy & Leak Protection" note with a shortcut to Android's VPN settings. |
 | 2.1.5 | 2026-10-10 | Home status card shows the DNS actually in use for the live session. |
 | 2.1.4 | 2026-10-10 | Regression fix: engine stop "echoes" are now attributed to the stop that caused them, so Stealth Auto and WARP connect on the first tap again. |
 | 2.1.3 | 2026-10-10 | App reconciles its state with the real tunnel state on start/resume (no more stale "Connected"); Free mode gained its persistent notification with Disconnect. |
