@@ -176,6 +176,20 @@ class HealthService extends ChangeNotifier {
 
   /// Server ka (host, port, isUdp) nikalo — source ke hisaab se.
   Future<(String, int, bool)?> _resolveTarget(VpnServer s) async {
+    // Sources that publish their endpoint up front (the VPNGate
+    // API and rolling pool, the VPNBook variants) carry the probe
+    // target on the server itself — no config download is needed
+    // to health-check them.
+    if (s.probeHost != null && s.probePort != null) {
+      return (s.probeHost!, s.probePort!, s.probeUdp);
+    }
+    // Pool UDP entries are the one exception: the pool index
+    // carries no port for them (a TCP probe cannot judge a UDP
+    // server), so resolve the target from the config once and
+    // cache it — the same trick the mirror entries use.
+    if (s.source == 'vpngate-pool') {
+      return _mirrorTarget(s);
+    }
     switch (s.source) {
       case 'vpngate':
         return _parseOvpnTarget(s.ovpnConfig);
@@ -357,8 +371,10 @@ class HealthService extends ChangeNotifier {
 ///    the measured probe latency when present, otherwise the ping the
 ///    source API reported ([VpnServer.pingMs], e.g. VPNGate).
 /// 2. Working servers with no speed information.
-/// 3. Unchecked servers, keeping their input order (tier order for
-///    stealth lists, API order for OpenVPN sources).
+/// 3. Unchecked servers — externally verified ones (a liveness
+///    registry's real handshake test) before plain unchecked ones,
+///    then their input order (tier order for stealth lists, API
+///    order for OpenVPN sources).
 /// 4. Dead servers last.
 ///
 /// The sort is stable: servers that compare equal keep input order.
@@ -377,22 +393,40 @@ List<VpnServer> sortByHealthAndLatency(
 
   int? speedOf(VpnServer s) => health.latencyOf(s.id) ?? s.pingMs;
 
-  final decorated = <(int, int?, int, VpnServer)>[
+  // The overlay sub-rank, meaningful only inside the unchecked
+  // rank: a server an independent registry verified alive with a
+  // real handshake test ([VpnServer.externalVerified]) is a better
+  // first try than a completely untested one. It can never lift a
+  // server out of the rank the app's own checks put it in — a
+  // server the app found dead stays in the dead rank, verified or
+  // not.
+  int subRankOf(VpnServer s) =>
+      (rankOf(s) == 2 && s.externalVerified) ? 0 : 1;
+
+  final decorated = <(int, int, int?, int, VpnServer)>[
     for (var i = 0; i < servers.length; i++)
-      (rankOf(servers[i]), speedOf(servers[i]), i, servers[i]),
+      (
+        rankOf(servers[i]),
+        subRankOf(servers[i]),
+        speedOf(servers[i]),
+        i,
+        servers[i],
+      ),
   ];
   decorated.sort((a, b) {
     final byRank = a.$1.compareTo(b.$1);
     if (byRank != 0) return byRank;
-    final sa = a.$2;
-    final sb = b.$2;
+    final bySubRank = a.$2.compareTo(b.$2);
+    if (bySubRank != 0) return bySubRank;
+    final sa = a.$3;
+    final sb = b.$3;
     if (sa != null && sb != null) {
       final bySpeed = sa.compareTo(sb);
       if (bySpeed != 0) return bySpeed;
     }
-    return a.$3.compareTo(b.$3);
+    return a.$4.compareTo(b.$4);
   });
-  return [for (final e in decorated) e.$4];
+  return [for (final e in decorated) e.$5];
 }
 
 /// The fastest server in [servers] according to [health]: the

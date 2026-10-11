@@ -20,6 +20,7 @@ import 'package:ipchakra/services/user_lists_service.dart';
 import 'package:ipchakra/services/v2ray_service.dart';
 import 'package:ipchakra/services/vpn_controller.dart';
 import 'package:ipchakra/services/vpnbook_service.dart';
+import 'package:ipchakra/services/vpngate_pool_service.dart';
 import 'package:ipchakra/services/vpngate_service.dart';
 import 'package:ipchakra/services/warp_service.dart';
 import 'package:ipchakra/widgets/animated_background.dart';
@@ -29,6 +30,7 @@ class _Rig {
   final db = ServerDatabase();
   final warp = WarpService();
   final vpngate = VpnGateService();
+  final pool = VpnGatePoolService();
   final vpnbook = VpnBookService();
   final mirror = OvpnMirrorService();
   final v2ray = V2RayService();
@@ -223,6 +225,7 @@ void main() {
       db: rig.db,
       vpn: rig.vpn,
       vpngate: rig.vpngate,
+      pool: rig.pool,
       vpnbook: rig.vpnbook,
       mirror: rig.mirror,
       v2ray: rig.v2ray,
@@ -255,6 +258,7 @@ void main() {
       db: rig.db,
       vpn: rig.vpn,
       vpngate: rig.vpngate,
+      pool: rig.pool,
       vpnbook: rig.vpnbook,
       mirror: rig.mirror,
       v2ray: rig.v2ray,

@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../core/theme.dart';
 import '../models/vpn_server.dart';
 import '../services/health_service.dart';
+import '../services/openvpn_database.dart';
 import '../services/ovpn_mirror_service.dart';
 import '../services/server_database.dart';
 import '../services/share_service.dart';
@@ -14,14 +15,16 @@ import '../services/user_lists_service.dart';
 import '../services/v2ray_service.dart';
 import '../services/vpnbook_service.dart';
 import '../services/vpn_controller.dart';
+import '../services/vpngate_pool_service.dart';
 import '../services/vpngate_service.dart';
 
-/// Server list: Free (WARP) | OpenVPN (VPNGate + VPNBook + Mirror) |
-/// Stealth (Xray) | Chakra.
+/// Server list: Free (WARP) | OpenVPN (VPNGate + Pool + VPNBook +
+/// Mirror) | Stealth (Xray) | Chakra.
 class ServersScreen extends StatefulWidget {
   final ServerDatabase db;
   final VpnController vpn;
   final VpnGateService vpngate;
+  final VpnGatePoolService pool;
   final VpnBookService vpnbook;
   final OvpnMirrorService mirror;
   final V2RayService v2ray;
@@ -34,6 +37,7 @@ class ServersScreen extends StatefulWidget {
     required this.db,
     required this.vpn,
     required this.vpngate,
+    required this.pool,
     required this.vpnbook,
     required this.mirror,
     required this.v2ray,
@@ -64,10 +68,25 @@ class ServersScreenState extends State<ServersScreen> {
 
   Timer? _healthDebounce;
 
+  /// Countries whose OpenVPN group is expanded in the grouped
+  /// list. Groups start collapsed, so a database of ~5,000 servers
+  /// renders as a short list of country headers; a group's rows
+  /// are built only while the group is expanded.
+  final Set<String> _ovpnExpanded = {};
+
+  /// How many rows of an expanded OpenVPN country group are shown
+  /// before the "Show more" row (per country; the shared ordering
+  /// puts the best servers first, so the first page is the useful
+  /// part of a group with thousands of entries).
+  final Map<String, int> _ovpnShown = {};
+  static const _ovpnFirstPage = 100;
+  static const _ovpnPageStep = 300;
+
   @override
   void initState() {
     super.initState();
     if (widget.vpngate.servers.isEmpty) widget.vpngate.load();
+    if (widget.pool.servers.isEmpty) widget.pool.load();
     if (widget.vpnbook.servers.isEmpty) widget.vpnbook.load();
     if (widget.mirror.servers.isEmpty) widget.mirror.load();
     if (widget.v2ray.servers.isEmpty) widget.v2ray.load();
@@ -79,6 +98,7 @@ class ServersScreenState extends State<ServersScreen> {
     // have no result yet removes the race entirely.
     widget.db.addListener(_onSourcesChanged);
     widget.vpngate.addListener(_onSourcesChanged);
+    widget.pool.addListener(_onSourcesChanged);
     widget.vpnbook.addListener(_onSourcesChanged);
     widget.mirror.addListener(_onSourcesChanged);
     widget.v2ray.addListener(_onSourcesChanged);
@@ -90,6 +110,7 @@ class ServersScreenState extends State<ServersScreen> {
     _healthDebounce?.cancel();
     widget.db.removeListener(_onSourcesChanged);
     widget.vpngate.removeListener(_onSourcesChanged);
+    widget.pool.removeListener(_onSourcesChanged);
     widget.vpnbook.removeListener(_onSourcesChanged);
     widget.mirror.removeListener(_onSourcesChanged);
     widget.v2ray.removeListener(_onSourcesChanged);
@@ -113,6 +134,7 @@ class ServersScreenState extends State<ServersScreen> {
   List<VpnServer> _allServers() => [
     ...widget.db.free,
     ...widget.vpngate.servers,
+    ...widget.pool.servers,
     ...widget.vpnbook.servers,
     ...widget.mirror.servers,
     ...widget.v2ray.servers,
@@ -125,6 +147,7 @@ class ServersScreenState extends State<ServersScreen> {
     await Future.wait([
       widget.db.load(forceRefresh: true),
       widget.vpngate.load(forceRefresh: true),
+      widget.pool.load(forceRefresh: true),
       widget.vpnbook.load(forceRefresh: true),
       widget.mirror.load(forceRefresh: true),
       widget.v2ray.load(forceRefresh: true),
@@ -149,12 +172,49 @@ class ServersScreenState extends State<ServersScreen> {
     }
   }
 
-  /// Combined list from every OpenVPN source.
-  List<VpnServer> get _openvpnServers => [
-    ...widget.vpngate.servers,
-    ...widget.vpnbook.servers,
-    ...widget.mirror.servers,
-  ];
+  List<VpnServer>? _mergedOvpnCache;
+  List<Object>? _mergedOvpnInputs;
+
+  /// The OpenVPN database: every source's servers merged into one
+  /// list, deduplicated by endpoint (the official API and the
+  /// rolling pool list many of the same relays) with the liveness
+  /// registry's verified hint applied. Memoized on the identity of
+  /// the source lists and the overlay set — the merge runs over
+  /// ~5,000 entries, and this getter is read on every rebuild,
+  /// including the health checker's progressive updates, where the
+  /// inputs have not changed.
+  List<VpnServer> get _openvpnServers {
+    final inputs = <Object>[
+      widget.vpngate.servers,
+      widget.pool.servers,
+      widget.vpnbook.servers,
+      widget.mirror.servers,
+      widget.pool.verifiedAliveKeys,
+    ];
+    final cache = _mergedOvpnCache;
+    final prev = _mergedOvpnInputs;
+    if (cache != null &&
+        prev != null &&
+        prev.length == inputs.length &&
+        [
+          for (var i = 0; i < inputs.length; i++)
+            identical(inputs[i], prev[i]),
+        ].every((same) => same)) {
+      return cache;
+    }
+    final merged = mergeOpenvpnServers(
+      [
+        widget.vpngate.servers,
+        widget.pool.servers,
+        widget.vpnbook.servers,
+        widget.mirror.servers,
+      ],
+      verifiedAliveKeys: widget.pool.verifiedAliveKeys,
+    );
+    _mergedOvpnCache = merged;
+    _mergedOvpnInputs = inputs;
+    return merged;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -224,6 +284,7 @@ class ServersScreenState extends State<ServersScreen> {
   Future<void> _refreshOpenvpn() async {
     await Future.wait([
       widget.vpngate.load(forceRefresh: true),
+      widget.pool.load(forceRefresh: true),
       widget.vpnbook.load(forceRefresh: true),
       widget.mirror.load(forceRefresh: true),
     ]);
@@ -277,6 +338,164 @@ class ServersScreenState extends State<ServersScreen> {
     );
   }
 
+  /// The one layout every server row in this app is built from
+  /// (v2.3.2). Until v2.3.1 both row widgets were Material ListTiles,
+  /// which size their leading and trailing slots first at full
+  /// intrinsic width and hand the title/subtitle only the leftover:
+  /// once Batch B put share + favourite buttons next to Connect in
+  /// the trailing slot, the leftover text slot at phone width
+  /// collapsed below the intrinsic width of the health badge sitting
+  /// in the title Row, the Expanded server name was allocated ~0 dp
+  /// and names wrapped one character per line (Shiv's S25
+  /// screenshots, 2026-10-11). This hand-built layout makes that
+  /// squeeze impossible by construction:
+  ///   * the name owns its whole line (an [Expanded] whose only
+  ///     neighbour is the compact favourite button), single line,
+  ///     ellipsis for genuinely long names;
+  ///   * the status line (health badge + badges + meta text) gets
+  ///     the full text-column width;
+  ///   * the action buttons live on their own right-aligned footer
+  ///     line, where they can never take width from any text.
+  /// New row variants must be built on this skeleton, never on a
+  /// ListTile with buttons in its trailing slot.
+  Widget _serverTile({
+    required VpnServer s,
+    required bool isCurrent,
+    required TextStyle nameStyle,
+    required double radius,
+    required String metaFirstLine,
+    String? metaSecondLine,
+    Widget? leading,
+    bool showBadges = false,
+    double metaFontSize = 11,
+  }) {
+    final metaStyle = TextStyle(
+      color: isCurrent ? ChakraTheme.green : Colors.white54,
+      fontSize: metaFontSize,
+    );
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: () => _connectTo(s),
+        borderRadius: BorderRadius.circular(radius),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (leading != null) ...[
+                leading,
+                const SizedBox(width: 12),
+              ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Name line.
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            s.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: nameStyle,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        _favButton(s),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    // Status line: health badge, tier/source badges,
+                    // then the first meta line with the remaining
+                    // width — it ellipsizes instead of squeezing the
+                    // badge or the name.
+                    Row(
+                      children: [
+                        _healthBadge(s),
+                        if (showBadges) _tierBadges(s),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            metaFirstLine,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: metaStyle,
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (metaSecondLine != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          metaSecondLine,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: metaStyle,
+                        ),
+                      ),
+                    const SizedBox(height: 8),
+                    // Footer actions: share, (remove), connect.
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        _shareButton(s),
+                        if (s.source == 'custom')
+                          IconButton(
+                            icon: const Icon(Icons.delete_outline, size: 20),
+                            tooltip: 'Remove imported server',
+                            color: Colors.white54,
+                            style: IconButton.styleFrom(
+                              tapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                              padding: const EdgeInsets.all(6),
+                              minimumSize: const Size(32, 32),
+                            ),
+                            onPressed: () => _removeCustomServer(s),
+                          ),
+                        const SizedBox(width: 6),
+                        if (isCurrent)
+                          const Chip(
+                            label: Text(
+                              'Connected',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                            backgroundColor: ChakraTheme.green,
+                          )
+                        else
+                          ElevatedButton(
+                            onPressed: () => _connectTo(s),
+                            style: ElevatedButton.styleFrom(
+                              // Shrink-wrap so the footer line stays
+                              // exactly as tall as the button, not the
+                              // padded 48 dp tap target.
+                              tapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                              minimumSize: const Size(76, 34),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                              ),
+                            ),
+                            child: const Text(
+                              'Connect',
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _warpCard(VpnServer s) {
     return ListenableBuilder(
       listenable: widget.vpn,
@@ -298,46 +517,16 @@ class ServersScreenState extends State<ServersScreen> {
                   : Colors.white.withValues(alpha: 0.08),
             ),
           ),
-          child: ListTile(
-            onTap: () => _connectTo(s),
+          child: _serverTile(
+            s: s,
+            isCurrent: isCurrent,
+            radius: 14,
+            nameStyle: const TextStyle(fontWeight: FontWeight.bold),
             leading: Text(s.flag, style: const TextStyle(fontSize: 30)),
-            title: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    s.name,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                ),
-                _healthBadge(s),
-              ],
-            ),
-            subtitle: Text(
-              isCurrent
-                  ? 'Connected • Tap to disconnect'
-                  : 'WARP Free • WireGuard',
-              style: TextStyle(
-                color: isCurrent ? ChakraTheme.green : Colors.white54,
-                fontSize: 12,
-              ),
-            ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _favButton(s),
-                _shareButton(s),
-                if (isCurrent)
-                  const Chip(
-                    label: Text('Connected'),
-                    backgroundColor: ChakraTheme.green,
-                  )
-                else
-                  ElevatedButton(
-                    onPressed: () => _connectTo(s),
-                    child: const Text('Connect'),
-                  ),
-              ],
-            ),
+            metaFontSize: 12,
+            metaFirstLine: isCurrent
+                ? 'Connected • Tap to disconnect'
+                : 'WARP Free • WireGuard',
           ),
         );
       },
@@ -349,12 +538,15 @@ class ServersScreenState extends State<ServersScreen> {
     return ListenableBuilder(
       listenable: widget.vpngate,
       builder: (context, _) => ListenableBuilder(
-        listenable: widget.vpnbook,
+        listenable: widget.pool,
         builder: (context, _) => ListenableBuilder(
-          listenable: widget.mirror,
+          listenable: widget.vpnbook,
           builder: (context, _) => ListenableBuilder(
-            listenable: widget.userLists,
-            builder: (context, _) => _openvpnBody(),
+            listenable: widget.mirror,
+            builder: (context, _) => ListenableBuilder(
+              listenable: widget.userLists,
+              builder: (context, _) => _openvpnBody(),
+            ),
           ),
         ),
       ),
@@ -365,6 +557,7 @@ class ServersScreenState extends State<ServersScreen> {
     final all = _openvpnServers;
     final anyLoading =
         widget.vpngate.loading ||
+        widget.pool.loading ||
         widget.vpnbook.loading ||
         widget.mirror.loading;
     if (all.isEmpty && anyLoading) {
@@ -425,27 +618,135 @@ class ServersScreenState extends State<ServersScreen> {
     for (final name in groups.keys.toList()) {
       groups[name] = sortByHealthAndLatency(groups[name]!, widget.health);
     }
-    return ListView(
-      padding: const EdgeInsets.all(12),
-      children: [
-        chips,
-        _searchBox('Search by country… (for example India, Japan)'),
+    // The grouped list is FLATTENED and built lazily: with ~5,000
+    // servers in the database, an eager ListView of country cards
+    // (the pre-pool structure) would construct every row of every
+    // group up front. Here each country contributes one header
+    // item, and its rows become items only while the group is
+    // expanded — and even then only the visible page of rows, with
+    // a "Show more" item for the rest. ListView.builder inflates
+    // just the items on screen, so the list scrolls smoothly at
+    // any database size.
+    final items = <_OvpnItem>[
+      _OvpnWidget(chips),
+      _OvpnWidget(_searchBox('Search by country… (for example India, Japan)')),
+      _OvpnWidget(
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
           child: Text(
-            '${pool.length} servers • ${groups.length} countries • VPNGate + VPNBook + Mirror',
+            '${pool.length} servers • ${groups.length} countries • VPNGate + Pool + VPNBook + Mirror',
             style: const TextStyle(color: Colors.white38, fontSize: 11),
           ),
         ),
-        _healthSummary(),
-        if (_ovpnFilter == 'Favourites' && pool.isEmpty)
-          _emptyFilterText('Favourites'),
-        for (var i = 0; i < filtered.length; i++)
-          _FadeIn(
-            index: i,
-            child: _countryGroup(filtered[i], groups[filtered[i]]!),
+      ),
+      _OvpnWidget(_healthSummary()),
+      if (_ovpnFilter == 'Favourites' && pool.isEmpty)
+        _OvpnWidget(_emptyFilterText('Favourites')),
+    ];
+    for (final country in filtered) {
+      final servers = groups[country]!;
+      items.add(_OvpnHeader(country, servers));
+      if (_ovpnExpanded.contains(country)) {
+        items.add(_OvpnFastest(country, servers));
+        final shown = _ovpnShown[country] ?? _ovpnFirstPage;
+        final page = shown < servers.length ? shown : servers.length;
+        for (var i = 0; i < page; i++) {
+          items.add(_OvpnRow(servers[i]));
+        }
+        if (page < servers.length) {
+          items.add(_OvpnMore(country, page, servers.length));
+        }
+      }
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.all(12),
+      itemCount: items.length,
+      itemBuilder: (context, i) => _ovpnItemWidget(items[i]),
+    );
+  }
+
+  Widget _ovpnItemWidget(_OvpnItem item) {
+    return switch (item) {
+      _OvpnWidget(:final widget) => widget,
+      _OvpnHeader(:final country, :final servers) =>
+        _ovpnGroupHeader(country, servers),
+      _OvpnFastest(:final country, :final servers) => Padding(
+          padding: const EdgeInsets.only(left: 12),
+          child: _fastestTile(country, servers),
+        ),
+      _OvpnRow(:final server) => Padding(
+          padding: const EdgeInsets.only(left: 12),
+          child: _serverRow(server),
+        ),
+      _OvpnMore(:final country, :final shown, :final total) => Padding(
+          padding: const EdgeInsets.only(left: 12),
+          child: TextButton(
+            onPressed: () => setState(
+              () => _ovpnShown[country] = shown + _ovpnPageStep,
+            ),
+            child: Text(
+              'Show more — $shown of $total shown',
+              style: const TextStyle(color: ChakraTheme.cyan, fontSize: 12),
+            ),
           ),
-      ],
+        ),
+    };
+  }
+
+  /// A country group header for the OpenVPN list: flag, country
+  /// name and the group's server count, with an expand chevron.
+  /// Tapping toggles the group's rows in the flattened list.
+  Widget _ovpnGroupHeader(String country, List<VpnServer> servers) {
+    final expanded = _ovpnExpanded.contains(country);
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      color: ChakraTheme.card,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: () => setState(() {
+          if (expanded) {
+            _ovpnExpanded.remove(country);
+          } else {
+            _ovpnExpanded.add(country);
+          }
+        }),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              Text(servers.first.flag, style: const TextStyle(fontSize: 30)),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      country,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    Text(
+                      '${servers.length} servers',
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                expanded ? Icons.expand_less : Icons.expand_more,
+                color: Colors.white54,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -778,6 +1079,10 @@ class ServersScreenState extends State<ServersScreen> {
                   ),
                   title: Text(
                     sub.name,
+                    // Subscription names are user-chosen and can be
+                    // long: keep the title on one line (v2.3.2 sweep).
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
@@ -965,20 +1270,25 @@ class ServersScreenState extends State<ServersScreen> {
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
-      child: Row(
-        children: [
-          for (final f in const ['All', 'Favourites', 'Recent'])
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: ChoiceChip(
-                label: Text(f),
-                selected: current == f,
-                onSelected: (selected) {
-                  if (selected) onChanged(f);
-                },
+      // Scrollable like the Stealth chip row: a plain Row of chips
+      // overflows on narrow screens or large font scales (v2.3.2).
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (final f in const ['All', 'Favourites', 'Recent'])
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: ChoiceChip(
+                  label: Text(f),
+                  selected: current == f,
+                  onSelected: (selected) {
+                    if (selected) onChanged(f);
+                  },
+                ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1020,6 +1330,14 @@ class ServersScreenState extends State<ServersScreen> {
       builder: (context, _) {
         final fav = widget.userLists.isFavourite(s.id);
         return IconButton(
+          // Compact: a server-row button must never take the default
+          // 48 dp slot — row width is the scarcest resource on a
+          // phone (see _serverTile).
+          style: IconButton.styleFrom(
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            padding: const EdgeInsets.all(6),
+            minimumSize: const Size(32, 32),
+          ),
           icon: Icon(
             fav ? Icons.star : Icons.star_border,
             size: 20,
@@ -1036,6 +1354,13 @@ class ServersScreenState extends State<ServersScreen> {
   /// (share / copy / QR for share links).
   Widget _shareButton(VpnServer s) {
     return IconButton(
+      // Compact for the same reason as the favourite button: row
+      // buttons must stay small next to the text they serve.
+      style: IconButton.styleFrom(
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        padding: const EdgeInsets.all(6),
+        minimumSize: const Size(32, 32),
+      ),
       icon: const Icon(Icons.share, size: 19),
       tooltip: 'Share server',
       color: Colors.white54,
@@ -1096,6 +1421,13 @@ class ServersScreenState extends State<ServersScreen> {
         if (checking || (w == null && widget.health.checking)) {
           c = Colors.grey;
           label = 'checking';
+        } else if (w == null && s.externalVerified) {
+          // Not yet checked by the app itself, but an independent
+          // registry verified this server alive with a real
+          // OpenVPN handshake — a stronger hint than "unchecked",
+          // and never shown once the app has its own verdict.
+          c = Colors.tealAccent;
+          label = 'verified';
         } else if (w == null) {
           c = Colors.white24;
           label = 'unchecked';
@@ -1185,6 +1517,7 @@ class ServersScreenState extends State<ServersScreen> {
 
   static const _sourceLabel = {
     'vpngate': 'VPNGate',
+    'vpngate-pool': 'VPNGate Pool',
     'vpnbook': 'VPNBook',
     'mirror': 'Mirror',
     'v2ray': 'Stealth',
@@ -1303,7 +1636,6 @@ class ServersScreenState extends State<ServersScreen> {
             widget.vpn.server?.id == s.id &&
             widget.vpn.state == VpnState.connected;
         final src = _sourceLabel[s.source] ?? s.source;
-        final isCustom = s.source == 'custom';
         return AnimatedContainer(
           duration: const Duration(milliseconds: 250),
           decoration: BoxDecoration(
@@ -1312,59 +1644,16 @@ class ServersScreenState extends State<ServersScreen> {
                 : Colors.transparent,
             borderRadius: BorderRadius.circular(10),
           ),
-          child: ListTile(
-            dense: true,
-            onTap: () => _connectTo(s),
-            title: Row(
-              children: [
-                Expanded(
-                  child: Text(s.name, style: const TextStyle(fontSize: 13)),
-                ),
-                _tierBadges(s),
-                _healthBadge(s),
-              ],
-            ),
-            subtitle: Text(
-              isCurrent
-                  ? '${s.note}\n$src • Connected • Tap to disconnect'
-                  : '${s.note}\n$src',
-              style: TextStyle(
-                color: isCurrent ? ChakraTheme.green : Colors.white54,
-                fontSize: 11,
-              ),
-            ),
-            isThreeLine: true,
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _shareButton(s),
-                _favButton(s),
-                if (isCurrent)
-                  const Chip(
-                    label: Text('Connected', style: TextStyle(fontSize: 11)),
-                    backgroundColor: ChakraTheme.green,
-                  )
-                else
-                  ElevatedButton(
-                    onPressed: () => _connectTo(s),
-                    style: ElevatedButton.styleFrom(
-                      minimumSize: const Size(70, 32),
-                      padding: EdgeInsets.zero,
-                    ),
-                    child: const Text(
-                      'Connect',
-                      style: TextStyle(fontSize: 12),
-                    ),
-                  ),
-                if (isCustom)
-                  IconButton(
-                    icon: const Icon(Icons.delete_outline, size: 20),
-                    tooltip: 'Remove imported server',
-                    color: Colors.white54,
-                    onPressed: () => _removeCustomServer(s),
-                  ),
-              ],
-            ),
+          child: _serverTile(
+            s: s,
+            isCurrent: isCurrent,
+            radius: 10,
+            nameStyle: const TextStyle(fontSize: 13),
+            showBadges: true,
+            metaFirstLine: s.note,
+            metaSecondLine: isCurrent
+                ? '$src • Connected • Tap to disconnect'
+                : src,
           ),
         );
       },
@@ -1446,6 +1735,49 @@ class ServersScreenState extends State<ServersScreen> {
     _showDnsFallbackNote();
     widget.onGoHome();
   }
+}
+
+/// One item of the flattened OpenVPN country list (see
+/// [ServersScreenState._openvpnBody]): the list is built lazily
+/// from these lightweight descriptors, so row widgets are only
+/// ever constructed for the items on screen.
+sealed class _OvpnItem {
+  const _OvpnItem();
+}
+
+/// A fixed header widget (filter chips, search box, summaries).
+class _OvpnWidget extends _OvpnItem {
+  final Widget widget;
+  const _OvpnWidget(this.widget);
+}
+
+/// A country group header (flag, name, server count, chevron).
+class _OvpnHeader extends _OvpnItem {
+  final String country;
+  final List<VpnServer> servers;
+  const _OvpnHeader(this.country, this.servers);
+}
+
+/// The "Connect fastest" row at the top of an expanded group.
+class _OvpnFastest extends _OvpnItem {
+  final String country;
+  final List<VpnServer> servers;
+  const _OvpnFastest(this.country, this.servers);
+}
+
+/// One server row of an expanded group.
+class _OvpnRow extends _OvpnItem {
+  final VpnServer server;
+  const _OvpnRow(this.server);
+}
+
+/// The "Show more" row at the end of an expanded group's visible
+/// page of rows.
+class _OvpnMore extends _OvpnItem {
+  final String country;
+  final int shown;
+  final int total;
+  const _OvpnMore(this.country, this.shown, this.total);
 }
 
 /// Lightweight staggered entrance for list items: fades in and slides

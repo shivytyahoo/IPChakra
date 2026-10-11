@@ -35,6 +35,28 @@ class VpnServer {
   final String? authUsername;
   final String? authPassword;
 
+  /// Runtime-only: direct health-probe target for sources whose
+  /// configs are fetched on demand (the VPNGate rolling pool, the
+  /// VPNBook protocol variants). When both are set, the health
+  /// checker probes this endpoint directly instead of downloading
+  /// the config first. [probePort] stays null when the source's
+  /// index does not carry the port (the pool's UDP entries) — the
+  /// health checker then resolves the target from the config once
+  /// and caches it, exactly like it does for mirror entries.
+  final String? probeHost;
+  final int? probePort;
+
+  /// Whether [probeHost]:[probePort] speaks UDP (OpenVPN over UDP
+  /// needs the host-reachability probe, not a bare TCP connect).
+  final bool probeUdp;
+
+  /// True when an independent liveness registry (the VPNGate
+  /// monitor's real OpenVPN handshake tests) verified this server
+  /// alive. This is a hint for ordering and display only: the app's
+  /// own health verdict always wins, so a server the app found dead
+  /// stays dead even when this flag is set.
+  final bool externalVerified;
+
   const VpnServer({
     required this.id,
     required this.name,
@@ -55,7 +77,43 @@ class VpnServer {
     this.configLoader,
     this.authUsername,
     this.authPassword,
+    this.probeHost,
+    this.probePort,
+    this.probeUdp = false,
+    this.externalVerified = false,
   });
+
+  /// A copy of this server with [externalVerified] set — used when
+  /// the OpenVPN database merge learns from the liveness registry
+  /// that this endpoint passed a real handshake test.
+  VpnServer markVerified() {
+    if (externalVerified) return this;
+    return VpnServer(
+      id: id,
+      name: name,
+      country: country,
+      flag: flag,
+      type: type,
+      protocol: protocol,
+      warp: warp,
+      endpoint: endpoint,
+      peerPublicKey: peerPublicKey,
+      note: note,
+      enabled: enabled,
+      pingMs: pingMs,
+      ovpnConfig: ovpnConfig,
+      shareLink: shareLink,
+      tier: tier,
+      source: source,
+      configLoader: configLoader,
+      authUsername: authUsername,
+      authPassword: authPassword,
+      probeHost: probeHost,
+      probePort: probePort,
+      probeUdp: probeUdp,
+      externalVerified: true,
+    );
+  }
 
   bool get isChakra => type == 'chakra';
 

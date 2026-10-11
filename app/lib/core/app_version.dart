@@ -1,15 +1,15 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// The app's own version identity, kept in step with pubspec.yaml
-/// (version 2.3.1+13) — bump both together on every release.
+/// (version 2.3.3+15) — bump both together on every release.
 ///
 /// The build number drives the first-launch-after-upgrade refresh:
 /// when it changes, the server lists are force-refreshed once, so an
 /// upgrade can never leave the app serving caches written by an
 /// older build (the class of bug behind the v2.1.0 Hysteria2 list
 /// showing a single server from a pre-Hysteria2 cache).
-const String kAppVersionName = '2.3.1';
-const int kAppBuildNumber = 13;
+const String kAppVersionName = '2.3.3';
+const int kAppBuildNumber = 15;
 
 const String _kLastSeenBuild = 'last_seen_build';
 

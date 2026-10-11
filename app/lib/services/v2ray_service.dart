@@ -4,9 +4,9 @@ import 'package:flutter_v2ray_client/flutter_v2ray.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/vpn_server.dart';
+import 'country_table.dart';
 import 'hysteria_config.dart';
 import 'stealth_link.dart';
-import 'vpngate_service.dart';
 
 /// One share link from a public feed, together with the key of the
 /// feed that supplied it ('snsub', 'au1rxx', 'epodonios', …). The
@@ -973,7 +973,17 @@ class V2RayService extends ChangeNotifier {
     // never drops below 175 and Hysteria2 never below 45 of the
     // shipped pool, no matter how the feeds flood the other tiers.
     // Within a tier, slots are taken in merged-feed order, so the
-    // pre-tested sources (sNSub, Au1rxx) are picked first.
+    // pre-tested sources (sNSub, Au1rxx) are picked first — with one
+    // v2.3.3 refinement: servers whose country is known are picked
+    // before servers whose remark states no country. The list is
+    // grouped by country, and two of the largest feeds publish no
+    // country metadata at all (Au1rxx remarks are programmatic ids,
+    // Epodonios remarks are just the brand); letting them fill the
+    // quotas first shipped a pool that was 600/600 "Unknown" on
+    // 2026-10-11 — no country groups at all. Known-country servers
+    // (in the same merged-feed order) now take each tier's slots
+    // first; anonymous servers still fill whatever remains and the
+    // backfill, so no tier or source is ever excluded.
     const quotas = <String, int>{
       'Reality': 200,
       'Hysteria2': 60,
@@ -996,32 +1006,47 @@ class V2RayService extends ChangeNotifier {
       // so variants only fill a tier once its distinct endpoints
       // run out (and otherwise wait in the backfill like the rest).
       final seenEndpoints = <String>{};
-      final variants = <VpnServer>[];
       var taken = 0;
-      for (final s in list) {
-        if (taken >= quotas[tier]!) {
-          leftovers.add(s);
-          continue;
+
+      // One picking pass over [candidates]: distinct endpoints up
+      // to the quota, then endpoint variants while slots remain;
+      // the overflow waits in the backfill.
+      void pickFrom(List<VpnServer> candidates) {
+        final variants = <VpnServer>[];
+        for (final s in candidates) {
+          if (taken >= quotas[tier]!) {
+            leftovers.add(s);
+            continue;
+          }
+          final info =
+              s.shareLink == null ? null : StealthLink.parse(s.shareLink!);
+          final endpoint =
+              info == null ? s.id : '${info.host}:${info.port}';
+          if (seenEndpoints.add(endpoint)) {
+            picked.add(s);
+            taken++;
+          } else {
+            variants.add(s);
+          }
         }
-        final info =
-            s.shareLink == null ? null : StealthLink.parse(s.shareLink!);
-        final endpoint =
-            info == null ? s.id : '${info.host}:${info.port}';
-        if (seenEndpoints.add(endpoint)) {
-          picked.add(s);
-          taken++;
-        } else {
-          variants.add(s);
+        for (final s in variants) {
+          if (taken >= quotas[tier]!) {
+            leftovers.add(s);
+          } else {
+            picked.add(s);
+            taken++;
+          }
         }
       }
-      for (final s in variants) {
-        if (taken >= quotas[tier]!) {
-          leftovers.add(s);
-        } else {
-          picked.add(s);
-          taken++;
-        }
-      }
+
+      pickFrom([
+        for (final s in list)
+          if (s.country != 'Unknown' && s.country.isNotEmpty) s,
+      ]);
+      pickFrom([
+        for (final s in list)
+          if (s.country == 'Unknown' || s.country.isEmpty) s,
+      ]);
     }
     for (final entry in byTier.entries) {
       if (!quotas.containsKey(entry.key)) leftovers.addAll(entry.value);
@@ -1070,18 +1095,21 @@ class V2RayService extends ChangeNotifier {
   VpnServer? _toServer(String link, {String source = 'v2ray'}) {
     final info = StealthLink.parse(link);
     if (info == null) return null;
-    // Remark often looks like "CA-185.156.47.97-0424" — pull the
-    // two-letter country code that precedes the first '-'.
-    final codeMatch = RegExp(r'([A-Z]{2})-').firstMatch(info.remark);
-    final code = codeMatch?.group(1) ?? '';
-    final country = _countryName(code);
+    // The country lives only in the remark, written in whichever
+    // convention the feed chose (flag emoji, ISO code token,
+    // English or Chinese name). countryCodeFromRemark reads all of
+    // them and validates against the full ISO table; a remark that
+    // states no country honestly stays 'Unknown'.
+    final code = countryCodeFromRemark(info.remark) ?? '';
+    final country =
+        code.isEmpty ? 'Unknown' : (countryNameForCode(code) ?? 'Unknown');
     final name =
         info.remark.isNotEmpty ? info.remark : '$country ${info.host}'.trim();
     return VpnServer(
       id: '$source-${stableLinkId(link)}',
       name: name,
       country: country,
-      flag: VpnGateService.flagFor(code),
+      flag: code.isEmpty ? '🌐' : flagEmojiForCode(code),
       type: source == 'custom' ? 'custom' : 'free',
       protocol: 'v2ray',
       note: 'Stealth • ${info.tier}',
@@ -1090,23 +1118,6 @@ class V2RayService extends ChangeNotifier {
       tier: info.tier,
     );
   }
-
-  static const _names = {
-    'US': 'United States', 'CA': 'Canada', 'GB': 'United Kingdom',
-    'DE': 'Germany', 'FR': 'France', 'NL': 'Netherlands',
-    'SG': 'Singapore', 'JP': 'Japan', 'KR': 'South Korea',
-    'AU': 'Australia', 'IN': 'India', 'BR': 'Brazil',
-    'RU': 'Russia', 'TR': 'Turkey', 'AE': 'UAE',
-    'IT': 'Italy', 'ES': 'Spain', 'PL': 'Poland',
-    'SE': 'Sweden', 'CH': 'Switzerland', 'HK': 'Hong Kong',
-    'TW': 'Taiwan', 'VN': 'Vietnam', 'TH': 'Thailand',
-    'ID': 'Indonesia', 'MY': 'Malaysia', 'PH': 'Philippines',
-    'ZA': 'South Africa', 'MX': 'Mexico', 'AR': 'Argentina',
-    'CL': 'Chile', 'CO': 'Colombia', 'IR': 'Iran',
-  };
-
-  static String _countryName(String code) =>
-      _names[code.toUpperCase()] ?? (code.isNotEmpty ? code : 'Unknown');
 
   /// Stable server id fragment for a share [link]: the FNV-1a 32-bit
   /// hash of the link's UTF-8 bytes, as zero-padded hex.

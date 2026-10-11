@@ -160,14 +160,19 @@ class _HomeScreenState extends State<HomeScreen>
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Future<void> _setMode(AppMode mode) async {
+  void _setMode(AppMode mode) {
     final vpn = widget.vpn;
     if (vpn.mode == mode) return;
-    if (vpn.state == VpnState.connected ||
-        vpn.state == VpnState.connecting ||
-        vpn.state == VpnState.reconnecting) {
-      await vpn.disconnect();
-    }
+    // Mode switching is pure navigation and must NEVER tear down
+    // a live tunnel (v2.3.3 — S25 report: connecting in Stealth
+    // and then tapping the Free tab disconnected the VPN). The
+    // session state, the connected server and the running engine
+    // are left completely untouched here. The engine handover
+    // happens only when the user explicitly taps Connect in the
+    // new mode: every connect path funnels through
+    // VpnController._connectOnce, which stops the old engine
+    // cleanly (its stop echoes are consumed as self-stops) before
+    // starting the new one.
     vpn.setMode(mode);
     if (mode == AppMode.chakra) {
       _showSnack(

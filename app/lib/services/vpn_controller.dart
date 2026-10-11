@@ -1840,6 +1840,26 @@ class VpnController extends ChangeNotifier {
       // Synchronous throw (jaise "not initialized")
       throw Exception('OpenVPN start nahi hua: ${_short(e)}');
     }
+    // The OpenVPN engine's connection notification needs
+    // POST_NOTIFICATIONS on Android 13+, and this engine's own
+    // plugin only ever requests the VPN permission — an
+    // OpenVPN-first user would never be asked, and on some phones
+    // the connected notification would then silently never appear.
+    // The permission is app-wide, so the request goes through the
+    // WireGuard plugin's helper (the same one the Free path uses):
+    // fire-and-forget after the connect has been issued, never on
+    // the connect critical path, and a denial only means no
+    // notification, never a failed connect. Platform-standard on
+    // every Android 13+ phone, no OEM-specific handling.
+    if (_isAndroid) {
+      unawaited(() async {
+        try {
+          await _wg
+              .requestNotificationPermission()
+              .timeout(const Duration(seconds: 5));
+        } catch (_) {}
+      }());
+    }
   }
 
   /// V2Ray/Xray se connect (free ss links).

@@ -70,10 +70,75 @@ Android itself), so a plain ongoing notification provides the same
 user-visible persistence without a second service competing with
 the backend.
 
+> **Superseded by Patch 3 (v2.3.3):** the persistence claim in the
+> paragraph above did not hold on the user's device — see below.
+
+## Patch 3 — The connection notification becomes a foreground-service notification
+
+**Field report (IPChakra v2.3.2, S25):** the WireGuard connection
+notification **disappears when the user clears notifications**,
+while the tunnel is still up.
+
+**Root cause:** the Patch 2 reasoning was wrong on the device.
+The notification was posted standalone through
+`NotificationManagerCompat.notify(...)`. The `setOngoing(true)`
+flag alone does not protect a standalone notification from
+"clear all" on the user's device, and no foreground service
+anywhere in the WireGuard path ever attaches it via
+`startForeground` — the tunnel's own `GoBackend$VpnService`
+declares no `foregroundServiceType` and (Patch 2, verified) never
+calls `startForeground`. The other two engines were audited at
+the same time and are NOT affected: the V2Ray service posts its
+notification with `setOngoing(true)` through
+`V2rayCoreManager`'s `startForeground(...)` call, and
+OpenVPN's `OpenVPNService` (in the shipped `openvpn_library` AAR)
+likewise contains `startForeground` and `setOngoing` and declares
+`foregroundServiceType="systemExempted"`.
+
+**Fix (all inside this vendored copy; no Dart API change):**
+
+- New file `android/.../WgConnectionService.kt`: a plain
+  foreground `Service` whose only job is to pin the connection
+  notification. `onStartCommand` builds the notification through
+  `WgNotification.build(...)` and attaches it with
+  `startForeground(NOTIFICATION_ID, notification,
+  FOREGROUND_SERVICE_TYPE_SPECIAL_USE)` on Android 14+ (the
+  untyped call below that). It is `START_NOT_STICKY` — the tunnel
+  lives in the same process, so a process death means the session
+  is over and the notification must not be resurrected — and
+  `onDestroy` leaves the foreground with the notification removed.
+- `WgNotification.kt`: the builder code moved verbatim into
+  `build(context)` (same channel, id 2602, title/text, launch
+  intent and Disconnect broadcast action). `show(context)` now
+  starts `WgConnectionService` via
+  `ContextCompat.startForegroundService(...)`; only if that start
+  itself throws does it fall back to the old standalone post, so a
+  status still appears. `cancel(context)` stops the service and
+  also cancels any standalone copy with the same id. The
+  `WgDisconnectReceiver` → `stopFromNotification` path (Patch 2)
+  is untouched: tapping Disconnect still performs the same backend
+  stop, and the resulting "disconnected" stage event is what stops
+  this service.
+- `android/src/main/AndroidManifest.xml`: declares
+  FOREGROUND_SERVICE and FOREGROUND_SERVICE_SPECIAL_USE, and the
+  service itself with `foregroundServiceType="specialUse"` and the
+  `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` property "VPN connection
+  status notification" (the same type the app's V2Ray VPN service
+  already uses).
+
+Verified in-sandbox at code level only: the ongoing flag and the
+startForeground attachment are in the shipped sources, and the
+merged manifest carries the service with its type. Whether
+Samsung's shade honours the guarantee end-to-end is a device
+question — the user's S25 is the verdict, as with every native
+behaviour in this app.
+
 ## Keeping this copy honest
 
 Other than this file, the build-configuration changes in Patch 1
 and the additions in Patch 2 (one new Kotlin file, small hunks in
 `WireguardFlutterPlugin.kt`, the plugin manifest, and the three
-Dart files), this copy matches upstream. When upgrading, re-apply
-only these patches.
+Dart files) plus Patch 3 (one more new Kotlin file,
+`WgConnectionService.kt`, a rework of `WgNotification.kt`'s
+show/cancel, and the plugin manifest), this copy matches upstream.
+When upgrading, re-apply only these patches.

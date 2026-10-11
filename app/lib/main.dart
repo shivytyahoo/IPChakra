@@ -10,6 +10,7 @@ import 'services/server_database.dart';
 import 'services/user_lists_service.dart';
 import 'services/v2ray_service.dart';
 import 'services/vpnbook_service.dart';
+import 'services/vpngate_pool_service.dart';
 import 'services/vpngate_service.dart';
 import 'services/warp_service.dart';
 import 'services/vpn_controller.dart';
@@ -32,6 +33,7 @@ class _IPChakraAppState extends State<IPChakraApp>
     with WidgetsBindingObserver {
   late final ServerDatabase db;
   late final VpnGateService vpngate;
+  late final VpnGatePoolService pool;
   late final VpnBookService vpnbook;
   late final OvpnMirrorService mirror;
   late final V2RayService v2ray;
@@ -49,6 +51,7 @@ class _IPChakraAppState extends State<IPChakraApp>
     WidgetsBinding.instance.addObserver(this);
     db = ServerDatabase();
     vpngate = VpnGateService();
+    pool = VpnGatePoolService();
     vpnbook = VpnBookService();
     mirror = OvpnMirrorService();
     v2ray = V2RayService();
@@ -75,6 +78,7 @@ class _IPChakraAppState extends State<IPChakraApp>
     }
     unawaited(userLists.load());
     unawaited(vpngate.load());
+    unawaited(pool.load());
     unawaited(vpnbook.load());
     unawaited(mirror.load());
     unawaited(v2ray.load(forceRefresh: upgraded));
@@ -136,6 +140,7 @@ class _IPChakraAppState extends State<IPChakraApp>
                     db: db,
                     vpn: vpn,
                     vpngate: vpngate,
+                    pool: pool,
                     vpnbook: vpnbook,
                     mirror: mirror,
                     v2ray: v2ray,

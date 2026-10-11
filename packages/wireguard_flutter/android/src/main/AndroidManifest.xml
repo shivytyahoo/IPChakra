@@ -4,7 +4,27 @@
          posted at all. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- IPChakra patch (see PATCHES.md, Patch 3): the connection
+         notification is owned by a foreground service
+         (WgConnectionService), which needs the foreground-service
+         permissions; the specialUse type matches the VPN purpose. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
     <application>
+        <!-- IPChakra patch (Patch 3): foreground service that pins
+             the WireGuard connection notification via
+             startForeground while the tunnel is up, so it cannot
+             be swiped away or removed by "clear all". Not exported;
+             started and stopped only by this plugin. -->
+        <service
+            android:name="billion.group.wireguard_flutter.WgConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="VPN connection status notification" />
+        </service>
         <!-- IPChakra patch: receives the connection notification's
              Disconnect action. Not exported — only this app can
              address it, and its pending intent is created by the

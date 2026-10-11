@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-v2.3.1%20Batch%20B-6C4CF1" alt="Release v2.3.1">
+  <img src="https://img.shields.io/badge/release-v2.3.3%20OpenVPN%20Mega--Database-6C4CF1" alt="Release v2.3.3">
   <img src="https://img.shields.io/badge/platform-Android%20%7C%20Android%20TV%20%7C%20Windows-3DDC84" alt="Platforms">
   <img src="https://img.shields.io/badge/built%20with-Flutter-02569B" alt="Built with Flutter">
   <img src="https://img.shields.io/badge/price-Free%20forever-success" alt="Free forever">
@@ -21,7 +21,7 @@
 
 A free VPN app for Android phones and Android TV, with a premium interface and three engines under one roof: WireGuard (Cloudflare WARP), OpenVPN, and Xray. IPChakra's speciality is its **Stealth mode** — modern censorship-resistant protocols (VLESS + Reality, Hysteria2, Trojan/TLS, Shadowsocks, VMess) with a connect system that only declares "Connected" after the tunnel has been *proven* to carry traffic with the DNS you chose.
 
-**Current release: v2.3.1 "Batch B"**
+**Current release: v2.3.3 "OpenVPN Mega-Database"**
 
 Made with ❤️ by Shiv
 
@@ -56,7 +56,9 @@ The server lists live in this repository and update **without an app update**:
 
 | Version | Date | Highlights |
 |---|---|---|
-| **2.3.1** | 2026-10-11 | **Batch B.** Favourites, recents and fastest-by-country picks; subscription import by URL; config sharing with QR codes; IPv6 leak hardening across all three engines. |
+| **2.3.3** | 2026-10-11 | **OpenVPN Mega-Database.** The OpenVPN list grows from ~290 to ≈5,128 entries — the VPNGate rolling pool (hourly bot pool of ~4,900 servers, fetched via a cheap change-index and parsed off the UI thread), a handshake-verified liveness overlay, and VPNBook in four protocol variants. Stealth country grouping restored (full ISO country detection; flags, codes, English and Chinese names). Switching modes no longer disconnects a live VPN — the engine hand-over happens only when you tap Connect in another mode. The WireGuard notification is now an ongoing foreground-service notification that cannot be swiped away while connected. |
+| 2.3.2 | 2026-10-11 | **Layout fix.** Server names render on one line again (a unified hand-built server tile replaces the ListTile rows whose trailing buttons starved the name of width), with rendered-geometry regression tests. |
+| 2.3.1 | 2026-10-11 | **Batch B.** Favourites, recents and fastest-by-country picks; subscription import by URL; config sharing with QR codes; IPv6 leak hardening across all three engines. |
 | 2.3.0 | 2026-10-11 | **More Servers.** Five new Stealth feeds (NoMoreWalls, MatinGhanbari, Au1rxx, sNSub, Barry-Far) — 22,476 unique servers measured live, a pool of 600 with quality-first selection and per-source labels. |
 | 2.2.0 | 2026-10-10 | **Stealth Resilience.** DNS escalation tiers with the server fixed, stability gate before "Connected", watchdog self-healing with a Reconnecting state, live English attempt log, Settings "Privacy & Leak Protection" note with a shortcut to Android's VPN settings. |
 | 2.1.5 | 2026-10-10 | Home status card shows the DNS actually in use for the live session. |

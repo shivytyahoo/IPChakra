@@ -18,7 +18,20 @@ class VpnBookService extends ChangeNotifier {
   static const _kTime = 'vpnbook_time';
 
   static const username = 'vpnbook';
-  static const _protocol = 'tcp443'; // firewall-friendly
+
+  /// The protocol variants the official config API accepts for
+  /// every host (live-verified 2026-10-11): the same server is
+  /// reachable over TCP 443, TCP 80, UDP 53 and UDP 25000, so each
+  /// host lists four entries — the extra ports are fallbacks for
+  /// networks that block the usual ones. TCP 443 stays first (it is
+  /// the firewall-friendliest) and keeps the historical server id,
+  /// so existing favourites and recents survive the change.
+  static const variants = <({String code, String label, int port, bool udp})>[
+    (code: 'tcp443', label: 'TCP 443', port: 443, udp: false),
+    (code: 'tcp80', label: 'TCP 80', port: 80, udp: false),
+    (code: 'udp53', label: 'UDP 53', port: 53, udp: true),
+    (code: 'udp25000', label: 'UDP 25000', port: 25000, udp: true),
+  ];
 
   /// hostname prefix -> country.
   static const _countries = {
@@ -72,7 +85,10 @@ class VpnBookService extends ChangeNotifier {
       pass ??= prefs.getString(_kPass);
       password = pass;
       if (hosts != null && hosts.isNotEmpty && (pass ?? '').isNotEmpty) {
-        servers = hosts.map((h) => _toServer(h, pass!)).toList();
+        servers = [
+          for (final h in hosts)
+            for (final v in variants) _toServer(h, pass!, v),
+        ];
       } else {
         error = 'VPNBook list nahi mili. Refresh karo.';
       }
@@ -82,22 +98,34 @@ class VpnBookService extends ChangeNotifier {
     }
   }
 
-  VpnServer _toServer(String host, String pass) {
+  VpnServer _toServer(
+    String host,
+    String pass,
+    ({String code, String label, int port, bool udp}) variant,
+  ) {
     final prefix = host.split('.').first.replaceAll(RegExp(r'[0-9]'), '');
     final c = _countries[prefix] ?? ['Europe', '🇪🇺'];
     return VpnServer(
-      id: 'vpnbook-$host',
+      // The TCP 443 variant keeps the id the app has always used
+      // for this host; the other variants carry their protocol in
+      // the id so each is a distinct list entry.
+      id: variant.code == 'tcp443'
+          ? 'vpnbook-$host'
+          : 'vpnbook-$host-${variant.code}',
       name: '${c[0]} ${host.split('.').first}',
       country: c[0],
       flag: c[1],
       type: 'free',
       protocol: 'openvpn',
-      note: 'VPNBook • TCP 443',
+      note: 'VPNBook • ${variant.label}',
       source: 'vpnbook',
-      configLoader: () => fetchConfig(host),
+      configLoader: () => fetchConfig(host, protocol: variant.code),
       // Plugin ke username/password params me jaayega (documented path).
       authUsername: username,
       authPassword: pass,
+      probeHost: host,
+      probePort: variant.port,
+      probeUdp: variant.udp,
     );
   }
 
@@ -106,18 +134,25 @@ class VpnBookService extends ChangeNotifier {
   ({List<String> hosts, String? password}) debugScrape(String html) =>
       _scrape(html);
 
-  /// Sirf test ke liye.
+  /// Sirf test ke liye — the default (TCP 443) variant.
   @visibleForTesting
-  VpnServer debugToServer(String host) => _toServer(host, 'testpass');
+  VpnServer debugToServer(String host) =>
+      _toServer(host, 'testpass', variants.first);
+
+  /// Sirf test ke liye — every protocol variant of one host.
+  @visibleForTesting
+  List<VpnServer> debugVariants(String host) =>
+      [for (final v in variants) _toServer(host, 'testpass', v)];
 
   /// Ek server ka .ovpn config lao (credentials embedded).
-  Future<String> fetchConfig(String hostname) async {
+  Future<String> fetchConfig(String hostname,
+      {String protocol = 'tcp443'}) async {
     final pass = password;
     if ((pass ?? '').isEmpty) {
       throw Exception('VPNBook password nahi mila. List refresh karo.');
     }
     final r = await http.get(
-      Uri.parse('$_apiUrl?hostname=$hostname&protocol=$_protocol'),
+      Uri.parse('$_apiUrl?hostname=$hostname&protocol=$protocol'),
       headers: {'User-Agent': 'Mozilla/5.0 (Linux; Android 14)'},
     ).timeout(const Duration(seconds: 30));
     if (r.statusCode != 200 || !r.body.contains('<ca>')) {

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/vpn_server.dart';
+import 'openvpn_database.dart';
 
 /// VPNGate (University of Tsukuba, Japan) ka free server network.
 ///
@@ -113,6 +114,12 @@ class VpnGateService extends ChangeNotifier {
         final config = utf8.decode(base64Decode(b64));
         if (!config.contains('<ca>')) continue;
         final mbps = (speed / 1000000).toStringAsFixed(0);
+        // The CSV's IP is the endpoint identity: the config's own
+        // remote line may use a hostname, but the pool index and
+        // the liveness registry both key on the IP, so the probe
+        // target (and with it the cross-source dedupe identity) is
+        // built from the IP plus the config's port and protocol.
+        final remote = parseOvpnRemote(config);
         out.add(VpnServer(
           id: 'vpngate-$ip',
           name: '$countryLong ${host.split('-').last}',
@@ -124,6 +131,9 @@ class VpnGateService extends ChangeNotifier {
           ovpnConfig: config,
           pingMs: ping,
           source: 'vpngate',
+          probeHost: ip,
+          probePort: remote?.$2,
+          probeUdp: remote?.$3 ?? false,
         ));
       } catch (_) {
         continue;

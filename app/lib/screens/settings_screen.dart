@@ -182,7 +182,7 @@ class SettingsScreen extends StatelessWidget {
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
                   ),
                   subtitle: Text(
-                    'Version 2.3.1\n\n'
+                    'Version 2.3.3\n\n'
                     'Free Mode: unlimited fast VPN.\n'
                     'Stealth Mode: Reality, Hysteria2, TLS and '
                     'Shadowsocks servers that stay working on '
