@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'adshield_stub.dart';
 import 'counting_dns.dart';
 import 'dns_service.dart';
 
@@ -35,7 +36,7 @@ Map<String, String> _parseHostsJson(String text) {
 /// - **V2Ray / Xray:** the bundled domain list (~218k entries,
 ///   generated from the standalone AdShield v0.6.1 EXTREME lists by
 ///   tools/gen_adshield_xray.py) is injected into the core's DNS
-///   as `dns.hosts` entries (`"domain:<d>": "0.0.0.0"`), a `dns`
+///   as `dns.hosts` entries (`"domain:<d>": "<stub IP>"`), a `dns`
 ///   protocol outbound (`dns-out`) is added, and two routing rules
 ///   steer lookups: app DNS on port 53 goes to `dns-out` (whose
 ///   internal DNS consults `hosts` first and forwards the rest to
@@ -70,12 +71,23 @@ class AdShieldService extends ChangeNotifier {
   static const dnsTag = 'adshield-dns';
   static const dnsOutboundTag = 'dns-out';
 
+  /// Anti-detect surrogate path: blocked names resolve to
+  /// [kAdShieldStubIp] (forwarder answers and hosts values), and
+  /// every TCP connection to it is redirected through this
+  /// dokodemo-door outbound to the local stub web server
+  /// ([AdShieldStubServer.port]), whose empty-but-valid resources
+  /// make "Ad blocker detected" bait probes succeed instead of
+  /// failing — while no real ad is ever fetched.
+  static const stubOutboundTag = 'adshield-stub';
+  static String get stubIp => kAdShieldStubIp;
+  static int get stubPort => AdShieldStubServer.port;
+
   bool _enabled = true;
 
   /// The user's switch: AdShield applies to the next VPN session.
   bool get enabled => _enabled;
 
-  /// The bundled hosts map (`domain:<d>` -> `0.0.0.0`), loaded in
+  /// The bundled hosts map (`domain:<d>` -> stub IP), loaded in
   /// the background. Empty until the asset finishes loading.
   Map<String, String> _hosts = const {};
   Map<String, String> get hosts => _hosts;
@@ -102,6 +114,11 @@ class AdShieldService extends ChangeNotifier {
 
   CountingDnsForwarder? _forwarder;
 
+  /// The anti-detect stub web server for this session (null when
+  /// the port could not be bound — the feature then degrades to
+  /// fail-fast for stub-IP connections).
+  AdShieldStubServer? _stubServer;
+
   /// DNS queries the forwarder has received this session.
   int sessionQueries = 0;
 
@@ -125,6 +142,10 @@ class AdShieldService extends ChangeNotifier {
   /// survive its own DNS escalation.
   Future<int?> startCounting(List<String> upstreams) async {
     if (_hosts.isEmpty) return null; // nothing to count against yet
+    // Anti-detect: the stub web server must be up before any bait
+    // request can land on it (both counting and hosts-fallback
+    // paths answer blocked names with the stub IP).
+    await _ensureStubServer();
     var forwarder = _forwarder;
     if (forwarder == null || !forwarder.running) {
       sessionQueries = 0;
@@ -152,6 +173,19 @@ class AdShieldService extends ChangeNotifier {
     return port;
   }
 
+  /// Start the anti-detect stub web server for the session.
+  /// Idempotent; a bind failure only degrades stub-IP connections
+  /// to fail-fast (the pre-anti-detect behaviour), never the
+  /// connection itself.
+  Future<void> _ensureStubServer() async {
+    var stub = _stubServer;
+    if (stub == null) {
+      stub = AdShieldStubServer();
+      _stubServer = stub;
+    }
+    await stub.start();
+  }
+
   /// Stop the forwarder (the session ended). The counters stay as
   /// they are — the card keeps showing the finished session's real
   /// totals until the next session starts counting.
@@ -159,6 +193,9 @@ class AdShieldService extends ChangeNotifier {
     final forwarder = _forwarder;
     _forwarder = null;
     await forwarder?.stop();
+    final stub = _stubServer;
+    _stubServer = null;
+    await stub?.stop();
     notifyListeners();
   }
 
@@ -253,7 +290,7 @@ class AdShieldService extends ChangeNotifier {
   ///      tunnel instead of looping into dns-out.
   ///    - `port: 53` from the TUN inbound only -> `dns-out`: app
   ///      DNS through the TUN hits the internal DNS, which
-  ///      consults `hosts` (AdShield list -> 0.0.0.0) and forwards
+  ///      consults `hosts` (AdShield list -> stub IP) and forwards
   ///      the rest upstream. Scoped to the TUN so SOCKS-inbound
   ///      sessions (the counting forwarder's own relays) are
   ///      never captured by it.
@@ -305,6 +342,23 @@ class AdShieldService extends ChangeNotifier {
       if (!hasDnsOut) {
         outboundList.add({'protocol': 'dns', 'tag': dnsOutboundTag});
       }
+      // Anti-detect: TCP to the stub IP is redirected to the local
+      // stub web server, whose surrogates make bait probes succeed.
+      final hasStubOut = outboundList.any((o) =>
+          o is Map &&
+          o['protocol'] == 'dokodemo-door' &&
+          o['tag'] == stubOutboundTag);
+      if (!hasStubOut) {
+        outboundList.add({
+          'protocol': 'dokodemo-door',
+          'tag': stubOutboundTag,
+          'settings': {
+            'address': '127.0.0.1',
+            'port': stubPort,
+            'network': 'tcp',
+          },
+        });
+      }
       var firstProxy = 'proxy';
       if (outboundList.isNotEmpty && outboundList.first is Map) {
         final tag = (outboundList.first as Map)['tag'];
@@ -325,9 +379,9 @@ class AdShieldService extends ChangeNotifier {
           rules is List ? List<dynamic>.from(rules) : <dynamic>[];
 
       // Front-insert in reverse so the final order is
-      // [DNS-client loopback rule, DNS-client proxy rule,
-      // port-53 rule, ...existing]. The order is what keeps the
-      // DNS plumbing loop-free:
+      // [stub-IP redirect, DNS-client loopback rule, DNS-client
+      // proxy rule, port-53 rule, ...existing]. The order is what
+      // keeps the DNS plumbing loop-free:
       // - The internal DNS client's own queries to a loopback
       //   upstream (the counting forwarder) go DIRECT. Routed
       //   into the tunnel instead, they land on the server's own
@@ -355,6 +409,16 @@ class AdShieldService extends ChangeNotifier {
         'inboundTag': [routeTag],
         'ip': ['127.0.0.0/8'],
         'outboundTag': 'direct',
+      });
+      // Anti-detect: TCP connections to the stub IP (blocked ad
+      // domains resolve to it) are redirected to the local stub web
+      // server. Front-inserted last so it lands at position 0 — it
+      // is disjoint from the DNS rules and must win over any
+      // default routing.
+      _frontInsertRule(ruleList, {
+        'type': 'field',
+        'ip': ['$kAdShieldStubIp/32'],
+        'outboundTag': stubOutboundTag,
       });
 
       // The port-853 rule (DoT stays direct) must exist exactly

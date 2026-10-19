@@ -109,12 +109,28 @@ bool isBlockedName(String qname, Map<String, String> hosts) {
   }
 }
 
+/// The surrogate stub IP answered for blocked A queries (anti-detect).
+///
+/// Bait requests (ad pixels / ad scripts) to this IP are redirected by
+/// the Xray config to the local stub web server, which answers with
+/// empty-but-valid surrogate resources — so "Ad blocker detected"
+/// probes see success instead of failure, while no real ad is ever
+/// fetched. Must match the dokodemo-door rule in
+/// [AdShieldService.injectXrayHosts] and the hosts generator.
+const kAdShieldStubIp = '10.10.10.3';
+
+/// The stub IP above as raw bytes.
+const kAdShieldStubIpBytes = [10, 10, 10, 3];
+
 /// Build the answer for a blocked name: the query's header and
 /// question echoed back, NOERROR, and — for A / AAAA queries — a
-/// single answer record pointing at 0.0.0.0 / :: with a short TTL.
-/// Other query types get a NODATA answer (NOERROR, no records):
-/// the name is blocked, there is simply nothing of that type.
-/// Pure — unit-tested.
+/// single answer record with a short TTL. A queries get the
+/// anti-detect stub IP ([kAdShieldStubIpBytes]); AAAA keeps ::
+///
+/// (nudging dual-stack clients onto IPv4, where the stub server can
+/// answer). Other query types get a NODATA answer (NOERROR, no
+/// records): the name is blocked, there is simply nothing of that
+/// type. Pure — unit-tested.
 Uint8List buildBlockedResponse(Uint8List query, DnsQueryInfo info) {
   final isA = info.qtype == 1;
   final isAAAA = info.qtype == 28;
@@ -138,7 +154,11 @@ Uint8List buildBlockedResponse(Uint8List query, DnsQueryInfo info) {
     data.setUint16(o + 4, 1); // class IN
     data.setUint32(o + 6, 60); // TTL
     data.setUint16(o + 10, rdlen);
-    // RDATA is already zeroed: 0.0.0.0 for A, :: for AAAA.
+    if (isA) {
+      // Anti-detect: the bait request succeeds against the stub
+      // server instead of failing. (AAAA RDATA stays zeroed = ::.)
+      out.setRange(o + 12, o + 16, kAdShieldStubIpBytes);
+    }
   }
   return out;
 }

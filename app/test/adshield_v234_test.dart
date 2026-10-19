@@ -14,8 +14,8 @@ import 'package:ipchakra/services/dns_service.dart';
 import 'package:ipchakra/services/ipv6_hardening.dart';
 
 const _testHosts = <String, String>{
-  'domain:ads.example.com': '0.0.0.0',
-  'domain:tracker.example.net': '0.0.0.0',
+  'domain:ads.example.com': '10.10.10.3',
+  'domain:tracker.example.net': '10.10.10.3',
 };
 
 /// A plugin-parser-shaped stealth config: proxy first, then direct,
@@ -65,7 +65,7 @@ void main() {
       expect(dns['tag'], AdShieldService.dnsTag);
       expect(
         (dns['hosts'] as Map)['domain:ads.example.com'],
-        '0.0.0.0',
+        '10.10.10.3', // anti-detect stub IP, not 0.0.0.0
       );
       // The attempt's own servers survive the injection.
       expect(dns['servers'], ['9.9.9.9', '149.112.112.112']);
@@ -76,22 +76,36 @@ void main() {
           .toList();
       expect(dnsOuts, hasLength(1));
       expect(dnsOuts.first['protocol'], 'dns');
+      // Anti-detect: the dokodemo-door stub outbound exists once.
+      final stubOuts = outbounds
+          .where((o) => o is Map && o['tag'] == 'adshield-stub')
+          .toList();
+      expect(stubOuts, hasLength(1));
+      expect(stubOuts.first['protocol'], 'dokodemo-door');
+      expect(
+        (stubOuts.first['settings'] as Map)['address'],
+        '127.0.0.1',
+      );
 
       final rules = (decoded['routing'] as Map)['rules'] as List;
-      // Our three rules lead, in loop-free order: the DNS
-      // client's loopback queries direct (a loopback upstream —
-      // the counting forwarder — must stay on the device), its
-      // other queries via the proxy, then TUN port 53 to dns-out
-      // (scoped to the TUN inbound so the forwarder's own SOCKS
-      // relays are never captured and looped).
-      expect(rules[0]['inboundTag'], ['adshield-dns']);
-      expect(rules[0]['ip'], ['127.0.0.0/8']);
-      expect(rules[0]['outboundTag'], 'direct');
+      // Our four rules lead: the stub-IP redirect first (disjoint
+      // from the DNS plumbing, must win over default routing),
+      // then the loop-free DNS order — the DNS client's loopback
+      // queries direct (a loopback upstream — the counting
+      // forwarder — must stay on the device), its other queries
+      // via the proxy, then TUN port 53 to dns-out (scoped to the
+      // TUN inbound so the forwarder's own SOCKS relays are never
+      // captured and looped).
+      expect(rules[0]['ip'], ['10.10.10.3/32']);
+      expect(rules[0]['outboundTag'], 'adshield-stub');
       expect(rules[1]['inboundTag'], ['adshield-dns']);
-      expect(rules[1]['outboundTag'], 'proxy');
-      expect(rules[2]['port'], '53');
-      expect(rules[2]['inboundTag'], ['tun']);
-      expect(rules[2]['outboundTag'], 'dns-out');
+      expect(rules[1]['ip'], ['127.0.0.0/8']);
+      expect(rules[1]['outboundTag'], 'direct');
+      expect(rules[2]['inboundTag'], ['adshield-dns']);
+      expect(rules[2]['outboundTag'], 'proxy');
+      expect(rules[3]['port'], '53');
+      expect(rules[3]['inboundTag'], ['tun']);
+      expect(rules[3]['outboundTag'], 'dns-out');
       // The pre-existing port-853 rule is kept exactly once.
       expect(
         rules.where((r) => r is Map && '${r['port']}' == '853'),
@@ -112,10 +126,20 @@ void main() {
         outbounds.where((o) => o is Map && o['tag'] == 'dns-out'),
         hasLength(1),
       );
+      expect(
+        outbounds.where((o) => o is Map && o['tag'] == 'adshield-stub'),
+        hasLength(1),
+      );
       final rules = (decoded['routing'] as Map)['rules'] as List;
       expect(
         rules
             .where((r) => r is Map && r['outboundTag'] == 'dns-out')
+            .toList(),
+        hasLength(1),
+      );
+      expect(
+        rules
+            .where((r) => r is Map && r['outboundTag'] == 'adshield-stub')
             .toList(),
         hasLength(1),
       );
@@ -146,13 +170,16 @@ void main() {
       expect((dns['hosts'] as Map).length, 2);
 
       final rules = (decoded['routing'] as Map)['rules'] as List;
-      expect(rules[0]['inboundTag'], ['adshield-dns']);
-      expect(rules[0]['outboundTag'], 'direct');
+      // rules[0] is the anti-detect stub-IP redirect; the DNS
+      // plumbing follows in loop-free order.
+      expect(rules[0]['outboundTag'], 'adshield-stub');
       expect(rules[1]['inboundTag'], ['adshield-dns']);
-      expect(rules[1]['outboundTag'], 'proxy');
-      expect(rules[2]['port'], '53');
-      expect(rules[2]['inboundTag'], ['tun']);
-      expect(rules[2]['outboundTag'], 'dns-out');
+      expect(rules[1]['outboundTag'], 'direct');
+      expect(rules[2]['inboundTag'], ['adshield-dns']);
+      expect(rules[2]['outboundTag'], 'proxy');
+      expect(rules[3]['port'], '53');
+      expect(rules[3]['inboundTag'], ['tun']);
+      expect(rules[3]['outboundTag'], 'dns-out');
       // The port-853 rule is added when missing.
       expect(
         rules.where((r) => r is Map && '${r['port']}' == '853'),
@@ -169,7 +196,7 @@ void main() {
       final out = AdShieldService.injectXrayHosts(bare, _testHosts);
       final decoded = _decode(out);
       final rules = (decoded['routing'] as Map)['rules'] as List;
-      expect(rules, hasLength(4)); // loopback, proxy, port 53, 853
+      expect(rules, hasLength(5)); // stub-ip, loopback, proxy, port 53, 853
     });
 
     test('an existing dns tag is preserved and used by the rule', () {
@@ -185,7 +212,10 @@ void main() {
       final decoded = _decode(out);
       expect((decoded['dns'] as Map)['tag'], 'custom-dns');
       final rules = (decoded['routing'] as Map)['rules'] as List;
-      expect(rules[0]['inboundTag'], ['custom-dns']);
+      // rules[0] is the anti-detect stub-IP redirect; the
+      // custom-tagged DNS-client rule follows it.
+      expect(rules[0]['outboundTag'], 'adshield-stub');
+      expect(rules[1]['inboundTag'], ['custom-dns']);
     });
 
     test('a pre-existing dns-out outbound is not duplicated', () {
@@ -219,8 +249,8 @@ void main() {
       final out =
           AdShieldService.injectXrayHosts(_pluginConfig(), _testHosts);
       final rules = (_decode(out)['routing'] as Map)['rules'] as List;
-      expect(rules[1]['inboundTag'], ['adshield-dns']);
-      expect(rules[1]['outboundTag'], 'proxy');
+      expect(rules[2]['inboundTag'], ['adshield-dns']);
+      expect(rules[2]['outboundTag'], 'proxy');
     });
   });
 
@@ -324,7 +354,8 @@ void main() {
       // and the hosts map agree, entry for entry.
       expect(svc.domainCount, 217592);
       expect(svc.hosts.length, svc.domainCount);
-      expect(svc.hosts.values.every((v) => v == '0.0.0.0'), isTrue);
+      // Anti-detect: every hosts value is the stub IP now.
+      expect(svc.hosts.values.every((v) => v == '10.10.10.3'), isTrue);
       expect(svc.source, 'AdShield v0.6.1 EXTREME');
       svc.dispose();
     });
@@ -354,6 +385,15 @@ void main() {
       final rules = (config['routing'] as Map)['rules'] as List;
       expect(
         rules.any((r) => r is Map && r['outboundTag'] == 'dns-out'),
+        isTrue,
+      );
+      // Anti-detect: the stub-IP redirect is present in counting
+      // mode too (the forwarder answers blocked A with the stub IP).
+      expect(
+        rules.any((r) =>
+            r is Map &&
+            r['outboundTag'] == 'adshield-stub' &&
+            '${r['ip']}' == '[10.10.10.3/32]'),
         isTrue,
       );
     });

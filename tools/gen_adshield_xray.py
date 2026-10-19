@@ -4,8 +4,13 @@
 Reads the standalone AdShield (v0.6.1 EXTREME) bundled domain lists and
 produces the two assets the app's V2Ray engine consumes at connect time:
 
-  app/assets/adshield/xray_hosts.json  {"domain:<d>": "0.0.0.0", ...}
+  app/assets/adshield/xray_hosts.json  {"domain:<d>": "<stub IP>", ...}
   app/assets/adshield/meta.json        {"domains": N, "source": ..., ...}
+
+The stub IP is the anti-detect surrogate address: blocked names
+resolve to it, and the Xray config redirects its TCP to the local
+stub web server (empty-but-valid resources), so "Ad blocker
+detected" bait probes succeed instead of failing.
 
 Parsing mirrors AdShield's AdBlocker.parseDomainSet exactly (strip,
 lowercase, strip surrounding dots, skip '#' comments, keep lines that
@@ -18,6 +23,10 @@ Run from the repository root. Idempotent.
 """
 
 import json
+
+# Anti-detect surrogate IP: must match kAdShieldStubIp in
+# app/lib/services/counting_dns.dart and AdShieldService.stubIp.
+STUB_IP = "10.10.10.3"
 import os
 import sys
 
@@ -86,7 +95,7 @@ def main():
     hosts_path = os.path.join(OUT_DIR, "xray_hosts.json")
     with open(hosts_path, "w", encoding="utf-8") as f:
         json.dump(
-            {f"domain:{d}": "0.0.0.0" for d in sorted(deduped)},
+            {f"domain:{d}": STUB_IP for d in sorted(deduped)},
             f,
             sort_keys=True,
             separators=(",", ":"),

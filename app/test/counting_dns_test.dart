@@ -51,7 +51,7 @@ void main() {
   });
 
   group('blocked / servfail responses', () {
-    test('A query gets a 0.0.0.0 answer echoing the question', () {
+    test('A query gets the anti-detect stub IP echoing the question', () {
       final query = DnsService.buildAQuery('ads.example.com', 0x99);
       final info = parseDnsQuery(query)!;
       final response = buildBlockedResponse(query, info);
@@ -63,12 +63,13 @@ void main() {
       // Question echoed verbatim.
       expect(response.sublist(12, info.questionEnd),
           query.sublist(12, info.questionEnd));
-      // Answer: pointer name, type A, class IN, rdlen 4, 0.0.0.0.
+      // Answer: pointer name, type A, class IN, rdlen 4, stub IP
+      // (anti-detect: bait succeeds against the local stub server).
       final o = info.questionEnd;
       expect(data.getUint16(o), 0xC00C);
       expect(data.getUint16(o + 2), 1);
       expect(data.getUint16(o + 10), 4);
-      expect(response.sublist(o + 12, o + 16), [0, 0, 0, 0]);
+      expect(response.sublist(o + 12, o + 16), [10, 10, 10, 3]);
     });
 
     test('SERVFAIL carries rcode 2 and no answers', () {
@@ -121,7 +122,7 @@ void main() {
       expect(blockedReply, isNotNull);
       expect(view(blockedReply!).getUint16(0), 0x1111);
       expect(view(blockedReply).getUint16(6), 1); // one answer
-      expect(blockedReply.sublist(blockedReply.length - 4), [0, 0, 0, 0]);
+      expect(blockedReply.sublist(blockedReply.length - 4), [10, 10, 10, 3]);
       expect(queries, 1);
       expect(blocked, 1);
 
