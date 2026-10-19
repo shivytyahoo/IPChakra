@@ -15,14 +15,32 @@ import 'stealth_link.dart';
 /// their round-trip time in [latencyMs], which drives fastest-first
 /// ordering. The UI updates progressively — badges flip as each batch
 /// completes.
+///
+/// Verdicts are PERSISTED (see [loadPersisted]) and stay fresh for
+/// [freshFor]: reopening the app shows the last-known badges and
+/// ordering instantly and only re-probes what is missing or stale,
+/// instead of re-probing ~5,800 servers from zero on every launch —
+/// the "checking goes on forever" device complaint. A manual
+/// refresh (checkAll) always re-probes everything.
 class HealthService extends ChangeNotifier {
   static const _kMirrorTargets = 'health_mirror_targets';
+  static const _kPersisted = 'health_results_v1';
 
   /// Probe timeout for a single TCP connect.
   static const probeTimeout = Duration(milliseconds: 1500);
 
   /// Servers probed concurrently in one batch.
-  static const batchSize = 30;
+  static const batchSize = 60;
+
+  /// How long a recorded verdict counts as fresh: incremental
+  /// checks skip fresh servers and only re-probe missing or stale
+  /// ones.
+  static const freshFor = Duration(minutes: 30);
+
+  /// serverId -> epoch milliseconds of its last completed probe.
+  final Map<String, int> _checkedAtMs = {};
+
+  Timer? _persistTimer;
 
   /// serverId -> working?
   final Map<String, bool> status = {};
@@ -71,16 +89,106 @@ class HealthService extends ChangeNotifier {
     }
   }
 
+  /// Load the persisted verdicts written by earlier launches, so
+  /// the lists open with their last-known badges and ordering
+  /// instead of a blank "unchecked" slate. Never throws.
+  Future<void> loadPersisted() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kPersisted);
+      if (raw == null) return;
+      final doc = jsonDecode(raw);
+      if (doc is! Map) return;
+      for (final e in doc.entries) {
+        final v = e.value;
+        if (v is List && v.length == 3) {
+          final id = e.key.toString();
+          status[id] = (v[0] as num) != 0;
+          final lat = (v[1] as num).toInt();
+          if (lat >= 0) latencyMs[id] = lat;
+          _checkedAtMs[id] = (v[2] as num).toInt();
+        }
+      }
+      notifyListeners();
+    } catch (_) {
+      // A malformed store just means a cold start.
+    }
+  }
+
+  /// Persist the current verdicts, debounced: probing records
+  /// results batch by batch, and the store is rewritten once the
+  /// results settle instead of thousands of times.
+  void _schedulePersist() {
+    _persistTimer?.cancel();
+    _persistTimer = Timer(const Duration(milliseconds: 800), () {
+      unawaited(_persistNow());
+    });
+  }
+
+  Future<void> _persistNow() async {
+    try {
+      final doc = <String, List<int>>{
+        for (final e in status.entries)
+          e.key: [
+            e.value ? 1 : 0,
+            latencyMs[e.key] ?? -1,
+            _checkedAtMs[e.key] ?? 0,
+          ],
+      };
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_kPersisted, jsonEncode(doc));
+    } catch (_) {
+      // Persistence is an optimisation; losing it costs a re-probe,
+      // never correctness.
+    }
+  }
+
+  /// Whether [s] needs a probe in an incremental pass right now:
+  /// it has no verdict yet, or its verdict is older than [freshFor].
+  /// A verdict recorded outside the probe path (tests seed [status]
+  /// directly, with no timestamp) counts as fresh — the seeding is
+  /// deliberate.
+  bool _needsCheck(VpnServer s, int nowMs) {
+    if (checkingIds.contains(s.id)) return false;
+    final ts = _checkedAtMs[s.id];
+    if (ts == null) return !status.containsKey(s.id);
+    return nowMs - ts > freshFor.inMilliseconds;
+  }
+
+  /// Whether an incremental pass should defer [s] to a manual
+  /// refresh: a port-less pool UDP entry's probe target can only be
+  /// learned by downloading its config (a network fetch of up to
+  /// 15 s inside a health check). The background auto-check must
+  /// never pay that per server — with ~1,000 such entries it alone
+  /// kept checking busy for many minutes. Entries whose target is
+  /// already cached probe normally, and a manual checkAll resolves
+  /// the rest.
+  bool _deferredForIncremental(VpnServer s) =>
+      s.source == 'vpngate-pool' &&
+      s.probeHost == null &&
+      !_mirrorTargets.containsKey(s.id);
+
   /// The currently running [checkMissing] pass chain, if any.
   Future<void>? _missingRun;
 
-  /// Incremental check: probe only the servers in [servers] that have
-  /// no health result yet. Safe to call repeatedly and concurrently —
-  /// calls made while a run is in flight wait for it and then re-scan,
-  /// so servers that arrive late (for example a stealth feed landing
-  /// after the WARP list) are still picked up instead of staying
-  /// "unchecked" forever. At most two passes run per call chain.
-  Future<void> checkMissing(List<VpnServer> servers) {
+  /// Incremental check: probe only the servers in [servers] that
+  /// have no fresh health result. Safe to call repeatedly and
+  /// concurrently — calls made while a run is in flight wait for it
+  /// and then re-scan, so servers that arrive late (for example a
+  /// stealth feed landing after the WARP list) are still picked up
+  /// instead of staying "unchecked" forever. At most two passes run
+  /// per call chain.
+  ///
+  /// With [priority] the pass runs IMMEDIATELY, in parallel with
+  /// any background run, instead of queueing behind it: the
+  /// connect paths use this for the bounded batch they are about
+  /// to choose from, because a user's Connect tap must never wait
+  /// for a background sweep of thousands of unrelated servers.
+  /// Per-server probing stays single-flight via [checkingIds], so
+  /// parallel passes can never probe the same server twice at once.
+  Future<void> checkMissing(List<VpnServer> servers,
+      {bool priority = false}) {
+    if (priority) return _runMissingPasses(servers);
     final active = _missingRun;
     if (active != null) {
       return active.then((_) => checkMissing(servers));
@@ -95,10 +203,12 @@ class HealthService extends ChangeNotifier {
 
   Future<void> _runMissingPasses(List<VpnServer> servers) async {
     try {
+      await _loadMirrorCacheOnce();
       for (var pass = 0; pass < 2; pass++) {
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
         final missing = servers
             .where(
-              (s) => !status.containsKey(s.id) && !checkingIds.contains(s.id),
+              (s) => _needsCheck(s, nowMs) && !_deferredForIncremental(s),
             )
             .toList();
         if (missing.isEmpty) return;
@@ -126,7 +236,7 @@ class HealthService extends ChangeNotifier {
       // UDP, so a TCP probe would report a working tunnel as dead.
       // Always working, never probed, no latency.
       if (s.source == 'warp' || s.warp) {
-        status[s.id] = true;
+        _recordResult(s.id, true);
         return;
       }
       // Hysteria2 runs over UDP/QUIC: its port will usually refuse a
@@ -140,10 +250,15 @@ class HealthService extends ChangeNotifier {
         final t = _parseLinkTarget(s.shareLink);
         if (t == null) return;
         if (await _udpHostProbe(t.$1, t.$2)) {
-          status[s.id] = true;
+          _recordResult(s.id, true);
         } else {
+          // No verdict — but the probe DID happen: stamp it, so
+          // the freshness window applies and back-to-back passes
+          // do not immediately re-probe the same unreachable host.
           status.remove(s.id);
           latencyMs.remove(s.id);
+          _checkedAtMs[s.id] = DateTime.now().millisecondsSinceEpoch;
+          _schedulePersist();
         }
         return;
       }
@@ -165,6 +280,8 @@ class HealthService extends ChangeNotifier {
 
   /// Store one probe outcome. A dead verdict clears any stale latency
   /// so fastest-first ordering never trusts an old measurement.
+  /// Every outcome is timestamped (the freshness window incremental
+  /// checks honour) and the persisted store is updated, debounced.
   void _recordResult(String id, bool working, {int? latency}) {
     status[id] = working;
     if (working && latency != null) {
@@ -172,6 +289,8 @@ class HealthService extends ChangeNotifier {
     } else if (!working) {
       latencyMs.remove(id);
     }
+    _checkedAtMs[id] = DateTime.now().millisecondsSinceEpoch;
+    _schedulePersist();
   }
 
   /// Server ka (host, port, isUdp) nikalo — source ke hisaab se.
@@ -227,21 +346,25 @@ class HealthService extends ChangeNotifier {
     }
   }
 
+  /// Load the persisted mirror/pool probe targets once.
+  Future<void> _loadMirrorCacheOnce() async {
+    if (_mirrorCacheLoaded) return;
+    _mirrorCacheLoaded = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kMirrorTargets);
+      if (raw != null) {
+        final map = jsonDecode(raw) as Map<String, dynamic>;
+        for (final e in map.entries) {
+          _mirrorTargets[e.key] = e.value.toString();
+        }
+      }
+    } catch (_) {}
+  }
+
   /// Mirror ka (host, port, udp) — pehli baar config se parse, phir cache.
   Future<(String, int, bool)?> _mirrorTarget(VpnServer s) async {
-    if (!_mirrorCacheLoaded) {
-      _mirrorCacheLoaded = true;
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        final raw = prefs.getString(_kMirrorTargets);
-        if (raw != null) {
-          final map = jsonDecode(raw) as Map<String, dynamic>;
-          for (final e in map.entries) {
-            _mirrorTargets[e.key] = e.value.toString();
-          }
-        }
-      } catch (_) {}
-    }
+    await _loadMirrorCacheOnce();
     final cached = _mirrorTargets[s.id];
     if (cached != null) {
       final parts = cached.split(':');
@@ -346,8 +469,10 @@ class HealthService extends ChangeNotifier {
     status.clear();
     latencyMs.clear();
     checkingIds.clear();
+    _checkedAtMs.clear();
     checking = false;
     lastChecked = null;
+    _schedulePersist();
     notifyListeners();
   }
 
@@ -464,4 +589,13 @@ List<VpnServer> aliveOrAll(List<VpnServer> servers, HealthService health) {
       .where((s) => health.isWorking(s.id) != false)
       .toList();
   return alive.isNotEmpty ? alive : servers;
+}
+
+/// Only the servers [health] has verified working — the membership
+/// of the lists' "Working" filter. Input order is preserved; the
+/// callers apply [sortByHealthAndLatency] and country grouping on
+/// top, so the filter shows working servers fastest-first per
+/// country and fills live as verdicts land.
+List<VpnServer> workingServers(List<VpnServer> servers, HealthService health) {
+  return servers.where((s) => health.isWorking(s.id) == true).toList();
 }

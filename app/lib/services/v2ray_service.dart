@@ -430,6 +430,20 @@ class V2RayService extends ChangeNotifier {
       final stale =
           DateTime.now().millisecondsSinceEpoch - lastFetch > 12 * 3600 * 1000;
 
+      // Cache-first: put the last-good list on screen immediately,
+      // before any fetching. A refresh (above all the forced one on
+      // the first launch after an upgrade) walks many feed URLs,
+      // each with its own timeout; until it finished, the Stealth
+      // tab used to sit empty — no servers to health-check, and a
+      // Connect tap that could do nothing — which on a slow or
+      // hanging feed host reads as "Stealth is dead". The refresh
+      // below still runs in this same call and rebuilds the list
+      // again when it lands; a failed fetch keeps this cached list,
+      // exactly as the old fallback did.
+      final cachedLinks = _cachedFeedLinks(prefs);
+      _rebuild(cachedLinks);
+      notifyListeners();
+
       List<StealthFeedLink>? links;
       if (forceRefresh || stale) {
         final fetched = await _fetchAllLinks();
@@ -456,7 +470,7 @@ class V2RayService extends ChangeNotifier {
         }
         if (subscriptions.isNotEmpty) await _persistSubscriptions();
       }
-      links ??= _cachedFeedLinks(prefs);
+      links ??= cachedLinks;
       _rebuild(links);
       if (servers.isEmpty) {
         error = 'Could not load the stealth server list. Pull to refresh.';
@@ -473,17 +487,35 @@ class V2RayService extends ChangeNotifier {
   /// that fails or yields nothing contributes nothing — the other
   /// feeds and the cache are unaffected.
   Future<List<StealthFeedLink>> _fetchAllLinks() async {
-    final perFeed = <(String, List<String>)>[];
-    for (final (source, urls, subscription) in _feeds) {
-      final links = <String>[];
-      for (final url in urls) {
-        links.addAll(subscription
-            ? await _fetchSubscriptionFeed(url)
-            : await _fetchPlainFeed(url));
-      }
-      perFeed.add((source, links));
-    }
+    // The feeds are fetched CONCURRENTLY. Fetched one after
+    // another, the pool's refresh time was the SUM of every feed's
+    // latency — with 13 URLs at up to 30 s timeout each, one
+    // hanging feed host could hold the whole Stealth list hostage
+    // for minutes. Concurrently it is the slowest single feed that
+    // decides. Every feed fetch already isolates its own failures
+    // (a failed feed contributes nothing), and Future.wait keeps
+    // the results in _feeds order, so the merge and its source
+    // attribution are exactly as before.
+    final perFeed = await Future.wait([
+      for (final feed in _feeds) _fetchOneFeed(feed),
+    ]);
     return mergeFeedLinks(perFeed);
+  }
+
+  /// Fetch every URL of one feed and merge its links. A feed's own
+  /// URLs stay sequential: some are per-protocol files that all
+  /// contribute (MatinGhanbari), and each fetch is independent and
+  /// failure-isolated, so this ordering costs nothing.
+  Future<(String, List<String>)> _fetchOneFeed(
+      (String, List<String>, bool) feed) async {
+    final (source, urls, subscription) = feed;
+    final links = <String>[];
+    for (final url in urls) {
+      links.addAll(subscription
+          ? await _fetchSubscriptionFeed(url)
+          : await _fetchPlainFeed(url));
+    }
+    return (source, links);
   }
 
   /// Merge per-feed link lists into one attributed list. [feeds] is

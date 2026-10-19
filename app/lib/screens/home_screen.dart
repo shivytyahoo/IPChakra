@@ -1,15 +1,18 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/theme.dart';
 import '../models/vpn_server.dart';
+import '../services/adshield_service.dart';
 import '../services/health_service.dart';
 import '../services/server_database.dart';
 import '../services/share_service.dart';
 import '../services/v2ray_service.dart';
 import '../services/vpn_controller.dart';
+import '../widgets/adshield_switch.dart';
 import '../widgets/animated_background.dart';
 import '../widgets/connect_button.dart';
 
@@ -20,6 +23,7 @@ class HomeScreen extends StatefulWidget {
   final VpnController vpn;
   final V2RayService v2ray;
   final HealthService health;
+  final AdShieldService adshield;
 
   const HomeScreen({
     super.key,
@@ -27,6 +31,7 @@ class HomeScreen extends StatefulWidget {
     required this.vpn,
     required this.v2ray,
     required this.health,
+    required this.adshield,
   });
 
   @override
@@ -131,8 +136,11 @@ class _HomeScreenState extends State<HomeScreen>
     final servers = widget.v2ray.servers;
     if (servers.isEmpty) {
       _showSnack(
-        'No stealth servers are available yet. Open the Servers tab '
-        'and refresh the Stealth list.',
+        widget.v2ray.loading
+            ? 'The Stealth list is still loading — give it a few '
+                'seconds and try again.'
+            : 'No stealth servers are available yet. Open the Servers '
+                'tab and refresh the Stealth list.',
       );
       return;
     }
@@ -142,7 +150,8 @@ class _HomeScreenState extends State<HomeScreen>
     final measured =
         servers.where((s) => widget.health.isWorking(s.id) != null).length;
     if (measured * 2 < servers.length) {
-      await widget.health.checkMissing(servers.take(60).toList());
+      await widget.health
+          .checkMissing(servers.take(60).toList(), priority: true);
     }
     // Dead servers are excluded — unless every candidate is dead.
     final candidates = aliveOrAll(_stealthCandidates(), widget.health);
@@ -231,6 +240,15 @@ class _HomeScreenState extends State<HomeScreen>
     if (vpn.state != VpnState.connected) return '—';
     final server = vpn.server;
     if (server == null) return '—';
+    // AdShield: the session's DNS carries ad-blocking — on V2Ray
+    // the bundled domain list is enforced by the core's DNS, on
+    // WireGuard/OpenVPN an ad-blocking provider answers. The
+    // provider named here is the one actually in use.
+    if (vpn.adShieldActive) {
+      final dns = vpn.effectiveDns;
+      if (dns == null) return 'AdShield';
+      return 'AdShield · ${dns.name}';
+    }
     if (server.protocol == 'openvpn') return 'Server provided';
     final dns = vpn.effectiveDns;
     if (dns == null) return '—';
@@ -297,7 +315,8 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: Listenable.merge([widget.vpn, widget.v2ray, widget.health]),
+      listenable: Listenable.merge(
+          [widget.vpn, widget.v2ray, widget.health, widget.adshield]),
       builder: (context, _) {
         final vpn = widget.vpn;
         final connected = vpn.state == VpnState.connected;
@@ -319,6 +338,8 @@ class _HomeScreenState extends State<HomeScreen>
                     _attemptLogCard(),
                     const SizedBox(height: 18),
                     _infoCard(),
+                    const SizedBox(height: 14),
+                    _adShieldCard(),
                     if (connected && vpn.server != null)
                       Padding(
                         padding: const EdgeInsets.only(top: 6),
@@ -630,6 +651,184 @@ class _HomeScreenState extends State<HomeScreen>
                   fontWeight: FontWeight.w600,
                 ),
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── AdShield card ───────────────────────────────────────────
+
+  /// The AdShield card: the animated on/off switch, the size of the
+  /// bundled blocklist, and a one-line description.
+  /// Android-only: on other platforms the switch is disabled with a
+  /// short note (the treatment lives in the tunnel configurations,
+  /// which only the Android engines consume).
+  Widget _adShieldCard() {
+    final adShield = widget.adshield;
+    final supported = Platform.isAndroid;
+    final on = adShield.enabled && supported;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: ChakraTheme.glassFill,
+        borderRadius: BorderRadius.circular(ChakraTheme.radiusMd),
+        border: Border.all(color: ChakraTheme.glassBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                on ? Icons.shield : Icons.shield_outlined,
+                color: on ? ChakraTheme.emerald : ChakraTheme.textDim,
+                size: 26,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'AdShield',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                        color: ChakraTheme.textMain,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      supported
+                          ? 'Blocks ads and trackers inside the VPN tunnel.'
+                          : 'AdShield is available on Android only.',
+                      style: const TextStyle(
+                        color: ChakraTheme.textDim,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              AdShieldSwitch(
+                value: adShield.enabled,
+                enabled: supported,
+                onChanged: (v) => adShield.setEnabled(v),
+              ),
+            ],
+          ),
+          if (supported) ...[
+            const SizedBox(height: 10),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              child: Text(
+                // Honest label: before the bundled list has loaded
+                // its size is unknown (never claim "0 blocked"),
+                // and with the switch off the domains are in the
+                // list, not blocked.
+                !adShield.listsLoaded
+                    ? 'Loading the blocklist…'
+                    : on
+                        ? '${adShield.domainCount} ad domains blocked at DNS'
+                        : '${adShield.domainCount} ad domains in the blocklist',
+                key: ValueKey(
+                    '${adShield.listsLoaded}-${adShield.domainCount}-$on'),
+                style: TextStyle(
+                  color: on ? ChakraTheme.emerald : ChakraTheme.textDim,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            // The switch applies to the NEXT connection. When a
+            // session is live and the switch no longer matches what
+            // that session is running, say so — otherwise flipping
+            // the switch looks broken (nothing changes on screen).
+            if (widget.vpn.state == VpnState.connected &&
+                adShield.enabled != widget.vpn.adShieldActive) ...[
+              const SizedBox(height: 6),
+              const Text(
+                'This change applies from your next connection.',
+                style: TextStyle(
+                  color: ChakraTheme.textDim,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+            // Live overview: REAL counters from the counting DNS
+            // forwarder, shown while a Stealth session counts (and
+            // after it ends, until the next session starts). The
+            // numbers only ever come from the forwarder — a session
+            // that never counted shows no overview at all.
+            if (adShield.countingActive || adShield.sessionQueries > 0) ...[
+              const SizedBox(height: 12),
+              const Text(
+                'LIVE OVERVIEW — THIS STEALTH SESSION',
+                style: TextStyle(
+                  color: ChakraTheme.textDim,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 1.1,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  _liveStat('${adShield.sessionQueries}', 'QUERIES'),
+                  _liveStat('${adShield.sessionBlocked}', 'BLOCKED'),
+                  _liveStat(
+                    adShield.sessionQueries == 0
+                        ? '—'
+                        : '${(adShield.sessionBlocked * 100 / adShield.sessionQueries).round()}%',
+                    'BLOCK RATE',
+                  ),
+                ],
+              ),
+            ] else if (widget.vpn.state == VpnState.connected &&
+                widget.vpn.adShieldActive) ...[
+              // A live WireGuard/OpenVPN session: its DNS never
+              // passes through the app, so there is nothing honest
+              // to count — say that instead of inventing numbers.
+              const SizedBox(height: 6),
+              const Text(
+                'Live query counting is available in Stealth mode.',
+                style: TextStyle(
+                  color: ChakraTheme.textDim,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// One live-overview figure: the value over its small label.
+  Widget _liveStat(String value, String label) {
+    return Expanded(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            value,
+            style: const TextStyle(
+              color: ChakraTheme.textMain,
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            style: const TextStyle(
+              color: ChakraTheme.textDim,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.8,
             ),
           ),
         ],

@@ -20,6 +20,15 @@
 // WireGuard engine, the V2Ray core "coming up" 60 ms after every
 // start, and the controller's debug seams for verification,
 // stability and watchdog probes.
+//
+// 2026-10-11 (Shiv's order): the R1–R3 machinery above never let a
+// connection through on his device across several fix rounds, so
+// the LIVE connect paths were replaced with a simple flow — one
+// attempt per server, the core's own DNS, Connected when the core
+// reports up, no watchdog. The controller tests below now pin
+// THAT contract (the pure helper tests for the ladder/gate
+// functions remain: the helpers still exist in dns_combo.dart,
+// disconnected from the live paths).
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -32,6 +41,7 @@ import 'package:ipchakra/core/theme.dart';
 import 'package:ipchakra/models/vpn_server.dart';
 import 'package:ipchakra/screens/home_screen.dart';
 import 'package:ipchakra/screens/settings_screen.dart';
+import 'package:ipchakra/services/adshield_service.dart';
 import 'package:ipchakra/services/dns_combo.dart';
 import 'package:ipchakra/services/dns_service.dart';
 import 'package:ipchakra/services/health_service.dart';
@@ -219,12 +229,29 @@ void main() {
       );
     });
 
-    test('an exit address that moved during the gate fails', () {
+    test('an exit address that moved during the gate still passes '
+        '(multi-exit servers rotate egress addresses legitimately)',
+        () {
       expect(
         stabilityGatePassed(
           probes: [
             (dnsOk: true, exitIp: '203.0.113.9'),
             (dnsOk: true, exitIp: '198.51.100.7'),
+          ],
+          verifiedExitIp: '203.0.113.9',
+          requiredProbes: 2,
+        ),
+        isTrue,
+      );
+    });
+
+    test('a probe whose exit fetch died fails when a verified exit '
+        'is known — the tunnel stopped carrying traffic', () {
+      expect(
+        stabilityGatePassed(
+          probes: [
+            (dnsOk: true, exitIp: '203.0.113.9'),
+            (dnsOk: true, exitIp: null),
           ],
           verifiedExitIp: '203.0.113.9',
           requiredProbes: 2,
@@ -286,203 +313,94 @@ void main() {
   });
 
   test(
-    'R1+R4: a manual connect escalates selected → measured others '
-    '→ (default not needed) with the server fixed, narrating each '
-    'step in order',
+    'simple flow (2026-10-11): a manual connect starts the engine '
+    'exactly once — no DNS measurement, no verification — and '
+    'connects when the core reports up, narrating both steps',
     () async {
       SharedPreferences.setMockInitialValues(
           {'dns_provider_id': 'controld-ads'});
       var starts = 0;
       final vpn = stealthController(onStart: () => starts++);
-      vpn.debugMeasureProviders =
-          () async => {'quad9': 30, 'google': 50, 'cloudflare': 80};
-      final verifiedWith = <String>[];
-      vpn.debugComboVerifier = (dns) async {
-        verifiedWith.add(dns.id);
-        return dns.id == 'google';
+      var measured = false;
+      vpn.debugMeasureProviders = () async {
+        measured = true;
+        return {'quad9': 30, 'google': 50, 'cloudflare': 80};
+      };
+      var verifyCalls = 0;
+      vpn.debugComboVerifier = (_) async {
+        verifyCalls++;
+        return false; // would fail everything — never consulted
       };
       final server = stealthServer('us-1', name: 'New York');
       await vpn.connect(server).timeout(const Duration(seconds: 90));
       expect(vpn.state, VpnState.connected);
-      expect(vpn.currentServer?.id, 'us-1',
-          reason: 'the picked server never changes during escalation');
-      expect(starts, 3, reason: 'one engine start per DNS attempt');
-      expect(verifiedWith, ['controld-ads', 'quad9', 'google'],
-          reason: 'Tier 1 selected, then Tier 2 in measured speed order');
-      expect(vpn.effectiveDns?.id, 'google');
-      // The log narrates the whole sequence, in order.
-      final log = vpn.attemptLog;
-      int at(String line) => log.indexOf(line);
-      expect(at('Trying New York with Control D Malware + Ads…'), 0);
-      expect(at('Control D Malware + Ads did not answer through the tunnel.'),
-          greaterThan(at('Trying New York with Control D Malware + Ads…')));
-      expect(at('Trying New York with Quad9…'),
-          greaterThan(at('Control D Malware + Ads did not answer through the tunnel.')));
-      expect(at('Quad9 did not answer through the tunnel.'),
-          greaterThan(at('Trying New York with Quad9…')));
-      expect(at('Trying New York with Google Public DNS…'),
-          greaterThan(at('Quad9 did not answer through the tunnel.')));
-      expect(at('Tunnel verified with Google Public DNS. Checking stability…'),
-          greaterThan(at('Trying New York with Google Public DNS…')));
-      expect(log.last, 'Connection stable — connected with Google Public DNS.',
-          reason: 'the success line is the last narration before '
-              'the Connected state it announces');
+      expect(vpn.currentServer?.id, 'us-1');
+      expect(starts, 1, reason: 'one server, one attempt, one start');
+      expect(measured, isFalse,
+          reason: 'no provider measurement runs before connecting');
+      expect(verifyCalls, 0,
+          reason: 'no through-tunnel verification gates the connect');
+      expect(vpn.effectiveDns?.id, 'dns-default',
+          reason: 'the session runs on the core\'s own DNS, not '
+              'the provider selected in Settings');
+      expect(vpn.attemptLog.first, 'Trying New York…');
+      expect(vpn.attemptLog.last, 'Connected with New York.');
       await vpn.disconnect();
     },
     timeout: const Timeout(Duration(seconds: 120)),
   );
 
   test(
-    'R1 Tier 3: when no named DNS verifies, the same server '
-    'connects with the default DNS treatment',
+    'simple flow: Connected follows the core\'s own report — no '
+    'verification or stability gate can tear a live tunnel down',
     () async {
       SharedPreferences.setMockInitialValues(
           {'dns_provider_id': 'controld-ads'});
       final vpn = stealthController();
-      vpn.debugMeasureProviders = () async => {'quad9': 30};
-      final verifiedWith = <String>[];
-      vpn.debugComboVerifier = (dns) async {
-        verifiedWith.add(dns.id);
-        return DnsService.isDefaultDns(dns);
-      };
-      await vpn
-          .connect(stealthServer('us-2', name: 'Chicago'))
-          .timeout(const Duration(seconds: 90));
-      expect(vpn.state, VpnState.connected);
-      expect(verifiedWith, ['controld-ads', 'quad9', 'dns-default']);
-      expect(vpn.effectiveDns?.id, 'dns-default');
-      expect(vpn.attemptLog,
-          contains('Trying Chicago with the default DNS…'));
-      expect(vpn.attemptLog.last,
-          'Connection stable — connected with the default DNS.');
-      expect(vpn.dnsFallbackNote, contains('default DNS'));
-      await vpn.disconnect();
-    },
-    timeout: const Timeout(Duration(seconds: 120)),
-  );
-
-  test(
-    'R2: verification alone never shows Connected — a combination '
-    'that fails the stability gate is torn down and the state '
-    'never passes through Connected',
-    () async {
-      SharedPreferences.setMockInitialValues(
-          {'dns_provider_id': 'controld-ads'});
-      final vpn = stealthController();
-      vpn.debugMeasureProviders = () async => const {};
-      // Every combination VERIFIES, but the tunnel's exit address
-      // moves during the gate — the classic "Connected, then dead
-      // by the time a site opens" shape.
-      vpn.debugComboVerifier = (_) async => true;
+      // Every old gate is primed to fail: in the simple flow none
+      // of them is consulted, so the connect still lands the
+      // moment the core reports its tunnel up.
+      vpn.debugComboVerifier = (_) async => false;
       vpn.debugVerifiedExitIp = '203.0.113.9';
       vpn.debugStabilityProbe =
-          (dns) async => (dnsOk: true, exitIp: '198.51.100.7');
+          (dns) async => (dnsOk: false, exitIp: null);
       final states = <VpnState>[];
       vpn.addListener(() => states.add(vpn.state));
       await vpn
           .connect(stealthServer('flappy', name: 'Flappy'))
           .timeout(const Duration(seconds: 90));
-      expect(vpn.state, VpnState.error,
-          reason: 'all attempts failed the stability gate, so the '
-              'connect ends in an honest error');
-      expect(states, isNot(contains(VpnState.connected)),
-          reason: 'the state must never have claimed Connected');
-      expect(vpn.attemptLog,
-          contains('The tunnel with Control D Malware + Ads did not stay stable.'));
-      expect(vpn.attemptLog,
-          contains('The tunnel with the default DNS did not stay stable.'));
-    },
-    timeout: const Timeout(Duration(seconds: 120)),
-  );
-
-  test(
-    'R2→R1: a stability failure on the selected DNS escalates to '
-    'the next DNS, which connects',
-    () async {
-      SharedPreferences.setMockInitialValues(
-          {'dns_provider_id': 'controld-ads'});
-      final vpn = stealthController();
-      vpn.debugMeasureProviders = () async => {'google': 40};
-      vpn.debugComboVerifier = (_) async => true;
-      vpn.debugVerifiedExitIp = '203.0.113.9';
-      vpn.debugStabilityProbe = (dns) async => dns.id == 'google'
-          ? (dnsOk: true, exitIp: '203.0.113.9')
-          : (dnsOk: true, exitIp: '198.51.100.7');
-      await vpn
-          .connect(stealthServer('us-3', name: 'Dallas'))
-          .timeout(const Duration(seconds: 90));
       expect(vpn.state, VpnState.connected);
-      expect(vpn.effectiveDns?.id, 'google');
-      expect(vpn.attemptLog.first, 'Trying Dallas with Control D Malware + Ads…');
-      expect(vpn.attemptLog,
-          contains('The tunnel with Control D Malware + Ads did not stay stable.'));
-      expect(vpn.attemptLog.last,
-          'Connection stable — connected with Google Public DNS.');
+      expect(states, contains(VpnState.connected));
+      expect(vpn.attemptLog.last, 'Connected with Flappy.');
       await vpn.disconnect();
     },
     timeout: const Timeout(Duration(seconds: 120)),
   );
 
   test(
-    'R3: two failed watchdog probes heal the session on the same '
-    'server, starting from the last working DNS, and the DNS '
-    'record follows the heal winner',
+    'simple flow: no watchdog, no probes, no heal — a connected '
+    'session is left alone until a real stop (the watchdog\'s '
+    'false strikes were part of the connect/disconnect churn)',
     () async {
       SharedPreferences.setMockInitialValues(
           {'dns_provider_id': 'controld-ads'});
       final vpn = stealthController();
-      vpn.debugMeasureProviders = () async => {'google': 40};
-      var verifyCalls = 0;
-      vpn.debugComboVerifier = (dns) async {
-        verifyCalls++;
-        // Call 1: the initial connect (Control D wins). During the
-        // heal, Control D fails and Google carries the session.
-        if (verifyCalls == 1) return dns.id == 'controld-ads';
-        return dns.id == 'google';
-      };
-      final server = stealthServer('heal-1', name: 'Heal Server');
+      final server = stealthServer('calm-1', name: 'Calm Server');
       await vpn.connect(server).timeout(const Duration(seconds: 90));
       expect(vpn.state, VpnState.connected);
-      expect(vpn.effectiveDns?.id, 'controld-ads');
-      expect(vpn.debugWatchdogRunning, isTrue,
-          reason: 'the watchdog arms when the session is confirmed');
-      final connectedAt = vpn.connectedAt;
-
-      // Healthy probes change nothing.
-      vpn.debugWatchdogProbe = () async => true;
-      await vpn.debugWatchdogTick();
+      expect(vpn.debugWatchdogRunning, isFalse,
+          reason: 'the session watchdog no longer arms');
+      // A primed-to-fail liveness seam is never consulted.
+      var probes = 0;
+      vpn.debugWatchdogProbe = () async {
+        probes++;
+        return false;
+      };
+      await Future<void>.delayed(const Duration(seconds: 2));
+      expect(probes, 0);
       expect(vpn.state, VpnState.connected);
-
-      // The tunnel dies silently (network switch): probes fail.
-      vpn.debugWatchdogProbe = () async => false;
-      final states = <VpnState>[];
-      vpn.addListener(() => states.add(vpn.state));
-      await vpn.debugWatchdogTick();
-      expect(vpn.state, VpnState.connected,
-          reason: 'one failed probe is not yet death');
-      await vpn.debugWatchdogTick();
-      // The second consecutive failure starts the heal.
-      await waitUntil(
-        () => vpn.state == VpnState.connected && !vpn.debugHealing,
-        'heal to complete',
-      );
-      expect(states, contains(VpnState.reconnecting),
-          reason: 'the heal presents as reconnecting — neither '
-              'Connected nor plain Disconnected');
-      expect(vpn.currentServer?.id, 'heal-1',
-          reason: 'the heal keeps the same server');
-      expect(vpn.effectiveDns?.id, 'google',
-          reason: 'the DNS record follows the heal winner');
-      expect(vpn.connectedAt, connectedAt,
-          reason: 'a healed session is the same session — its '
-              'start time does not reset');
-      expect(vpn.attemptLog,
-          contains('Connection lost. Reconnecting to Heal Server…'));
-      expect(vpn.attemptLog.last, 'Reconnected with Google Public DNS.');
-      expect(vpn.debugWatchdogRunning, isTrue,
-          reason: 'the watchdog re-arms for the healed session');
+      expect(vpn.debugHealing, isFalse);
       await vpn.disconnect();
-      expect(vpn.debugWatchdogRunning, isFalse);
     },
     timeout: const Timeout(Duration(seconds: 120)),
   );
@@ -514,6 +432,7 @@ void main() {
       vpn.debugWatchdogProbe = () async => false;
       await vpn.debugWatchdogTick();
       await vpn.debugWatchdogTick();
+      await vpn.debugWatchdogTick();
       await waitUntil(() => vpn.debugHealing, 'heal to start');
       expect(vpn.state, VpnState.reconnecting);
       final startsAtDisconnect = starts;
@@ -539,13 +458,13 @@ void main() {
       SharedPreferences.setMockInitialValues(
           {'dns_provider_id': 'controld-ads'});
       final vpn = stealthController();
-      vpn.debugMeasureProviders = () async => const {};
-      vpn.debugComboVerifier = (_) async => true;
       await vpn
           .connect(stealthServer('stop-1', name: 'Stop Server'))
           .timeout(const Duration(seconds: 90));
       expect(vpn.state, VpnState.connected);
-      expect(vpn.debugWatchdogRunning, isTrue);
+      expect(vpn.debugWatchdogRunning, isFalse,
+          reason: 'the watchdog no longer arms in the simple flow '
+              '— the invariant below is about the stop itself');
 
       // Even with probes that would fail, a reported stop is a
       // stop: the notification path must keep working exactly as
@@ -573,17 +492,16 @@ void main() {
   );
 
   test(
-    'R1 for Auto: after every normal combination fails, one '
-    'Tier-3 default-DNS attempt on the best candidate runs before '
-    'total failure',
+    'simple flow for Auto: candidates are tried in order and the '
+    'first core that comes up wins — one start, no DNS dimension',
     () async {
       SharedPreferences.setMockInitialValues(const {});
-      final vpn = stealthController();
-      vpn.debugMeasureProviders = () async => {'quad9': 30};
-      final verifiedPairs = <String>[];
-      vpn.debugComboVerifier = (dns) async {
-        verifiedPairs.add(dns.id);
-        return DnsService.isDefaultDns(dns);
+      var starts = 0;
+      final vpn = stealthController(onStart: () => starts++);
+      var verifyCalls = 0;
+      vpn.debugComboVerifier = (_) async {
+        verifyCalls++;
+        return false; // never consulted in the simple flow
       };
       final s1 = stealthServer('auto-a', name: 'Auto A');
       final s2 = stealthServer('auto-b', name: 'Auto B');
@@ -591,15 +509,13 @@ void main() {
           .connectStealthAuto([s1, s2])
           .timeout(const Duration(seconds: 120));
       expect(vpn.state, VpnState.connected);
-      expect(verifiedPairs, ['quad9', 'quad9', 'dns-default'],
-          reason: 'both normal combinations, then the default');
       expect(vpn.currentServer?.id, 'auto-a',
-          reason: 'Tier 3 runs on the best candidate');
+          reason: 'the first candidate\'s core came up, so it wins');
+      expect(starts, 1);
+      expect(verifyCalls, 0);
       expect(vpn.effectiveDns?.id, 'dns-default');
-      expect(vpn.attemptLog,
-          contains('Trying Auto A with the default DNS…'));
-      expect(vpn.attemptLog.last,
-          'Connection stable — connected with the default DNS.');
+      expect(vpn.attemptLog.first, 'Trying Auto A…');
+      expect(vpn.attemptLog.last, 'Connected with Auto A.');
     },
     timeout: const Timeout(Duration(seconds: 150)),
   );
@@ -626,6 +542,7 @@ void main() {
         vpn: vpn,
         v2ray: V2RayService(),
         health: HealthService(),
+        adshield: AdShieldService(),
       )));
       for (var i = 0; i < 4; i++) {
         await tester.pump(const Duration(milliseconds: 500));

@@ -13,6 +13,7 @@ import 'package:ipchakra/core/theme.dart';
 import 'package:ipchakra/models/vpn_server.dart';
 import 'package:ipchakra/screens/home_screen.dart';
 import 'package:ipchakra/screens/servers_screen.dart';
+import 'package:ipchakra/services/adshield_service.dart';
 import 'package:ipchakra/services/health_service.dart';
 import 'package:ipchakra/services/ovpn_mirror_service.dart';
 import 'package:ipchakra/services/server_database.dart';
@@ -36,6 +37,7 @@ class _Rig {
   final v2ray = V2RayService();
   final health = HealthService();
   final userLists = UserListsService();
+  final adshield = AdShieldService();
   late final vpn = VpnController(warp);
 }
 
@@ -107,6 +109,7 @@ void main() {
       vpn: rig.vpn,
       v2ray: rig.v2ray,
       health: rig.health,
+      adshield: rig.adshield,
     )));
     await _runSeconds(tester, 5);
     expect(tester.takeException(), isNull);
@@ -135,6 +138,7 @@ void main() {
       vpn: rig.vpn,
       v2ray: rig.v2ray,
       health: rig.health,
+      adshield: rig.adshield,
     )));
     await _runSeconds(tester, 5);
     expect(tester.takeException(), isNull);
@@ -208,6 +212,7 @@ void main() {
         vpn: rig.vpn,
         v2ray: rig.v2ray,
         health: rig.health,
+        adshield: rig.adshield,
       )));
       await _runSeconds(tester, 2);
       expect(tester.takeException(), isNull);

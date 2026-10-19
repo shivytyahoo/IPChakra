@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 
 import 'core/app_version.dart';
 import 'core/theme.dart';
+import 'services/adshield_service.dart';
 import 'services/health_service.dart';
+import 'services/health_sweeper.dart';
 import 'services/ovpn_mirror_service.dart';
 import 'services/server_database.dart';
 import 'services/user_lists_service.dart';
@@ -41,6 +43,8 @@ class _IPChakraAppState extends State<IPChakraApp>
   late final WarpService warp;
   late final UserListsService userLists;
   late final VpnController vpn;
+  late final AdShieldService adShield;
+  late final HealthSweeper _sweeper;
   bool _loading = true;
   int _tab = 0;
   final _serversKey = GlobalKey<ServersScreenState>();
@@ -58,7 +62,23 @@ class _IPChakraAppState extends State<IPChakraApp>
     health = HealthService();
     warp = WarpService();
     userLists = UserListsService();
-    vpn = VpnController(warp, userLists: userLists);
+    adShield = AdShieldService();
+    vpn = VpnController(warp, userLists: userLists, adShield: adShield);
+    // The background health sweep: while the app is open, every
+    // server gets checked on its own — the connect lists first,
+    // the bulk OpenVPN pool last — so a connect never has to
+    // discover dead servers one slow attempt at a time.
+    _sweeper = HealthSweeper(
+      health: health,
+      collect: () => [
+        ...v2ray.servers,
+        ...db.free,
+        ...vpngate.servers,
+        ...vpnbook.servers,
+        ...mirror.servers,
+        ...pool.servers,
+      ],
+    );
     _boot();
   }
 
@@ -69,6 +89,14 @@ class _IPChakraAppState extends State<IPChakraApp>
     // Database and free identity first; the remaining lists load in
     // the background.
     await db.load(forceRefresh: upgraded);
+    // Last-known health verdicts: the lists open with their badges
+    // and ordering already in place, and the background check only
+    // re-probes what is missing or stale.
+    await health.loadPersisted();
+    // With the last-known verdicts in place, the background sweep
+    // takes over: it fills the gaps and keeps verdicts fresh for
+    // as long as the app stays in the foreground.
+    _sweeper.start();
     // If WARP registration fails on a bad network, do not stay stuck
     // on the splash screen.
     try {
@@ -77,6 +105,9 @@ class _IPChakraAppState extends State<IPChakraApp>
       // WARP retries later; let the app open.
     }
     unawaited(userLists.load());
+    // AdShield: switch state loads first, then the bundled domain
+    // lists in the background; startup never waits for them.
+    unawaited(adShield.init());
     unawaited(vpngate.load());
     unawaited(pool.load());
     unawaited(vpnbook.load());
@@ -98,13 +129,22 @@ class _IPChakraAppState extends State<IPChakraApp>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(vpn.reconcileNativeState());
+      _sweeper.start();
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
+      // No badges are on screen while the app is away; probing
+      // then would only spend battery.
+      _sweeper.stop();
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _sweeper.stop();
     vpn.dispose();
+    adShield.dispose();
     super.dispose();
   }
 
@@ -134,7 +174,12 @@ class _IPChakraAppState extends State<IPChakraApp>
               body: IndexedStack(
                 index: _tab,
                 children: [
-                  HomeScreen(db: db, vpn: vpn, v2ray: v2ray, health: health),
+                  HomeScreen(
+                      db: db,
+                      vpn: vpn,
+                      v2ray: v2ray,
+                      health: health,
+                      adshield: adShield),
                   ServersScreen(
                     key: _serversKey,
                     db: db,

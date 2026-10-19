@@ -38,6 +38,7 @@ import 'package:wireguard_flutter/wireguard_flutter_platform_interface.dart';
 import 'package:ipchakra/core/theme.dart';
 import 'package:ipchakra/models/vpn_server.dart';
 import 'package:ipchakra/screens/home_screen.dart';
+import 'package:ipchakra/services/adshield_service.dart';
 import 'package:ipchakra/services/health_service.dart';
 import 'package:ipchakra/services/server_database.dart';
 import 'package:ipchakra/services/v2ray_service.dart';
@@ -198,6 +199,7 @@ void main() {
             vpn: vpn,
             v2ray: V2RayService(),
             health: HealthService(),
+            adshield: AdShieldService(),
           ),
         ),
       ));

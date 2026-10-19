@@ -544,7 +544,10 @@ class ServersScreenState extends State<ServersScreen> {
           builder: (context, _) => ListenableBuilder(
             listenable: widget.mirror,
             builder: (context, _) => ListenableBuilder(
-              listenable: widget.userLists,
+              // Health is a list-level input too, not just a row
+              // badge: the Working filter's membership changes as
+              // verdicts land, and it must fill live.
+              listenable: Listenable.merge([widget.userLists, widget.health]),
               builder: (context, _) => _openvpnBody(),
             ),
           ),
@@ -583,6 +586,7 @@ class ServersScreenState extends State<ServersScreen> {
     final chips = _listFilterChips(
       current: _ovpnFilter,
       onChanged: (v) => setState(() => _ovpnFilter = v),
+      includeWorking: true,
     );
     if (_ovpnFilter == 'Recent') {
       // Recents are a flat shortlist in recency order — grouping by
@@ -600,9 +604,12 @@ class ServersScreenState extends State<ServersScreen> {
         ],
       );
     }
-    final pool = _ovpnFilter == 'Favourites'
-        ? all.where((s) => widget.userLists.isFavourite(s.id)).toList()
-        : all;
+    final pool = switch (_ovpnFilter) {
+      'Favourites' =>
+        all.where((s) => widget.userLists.isFavourite(s.id)).toList(),
+      'Working' => workingServers(all, widget.health),
+      _ => all,
+    };
     // Group by country.
     final groups = <String, List<VpnServer>>{};
     for (final s in pool) {
@@ -640,8 +647,9 @@ class ServersScreenState extends State<ServersScreen> {
         ),
       ),
       _OvpnWidget(_healthSummary()),
-      if (_ovpnFilter == 'Favourites' && pool.isEmpty)
-        _OvpnWidget(_emptyFilterText('Favourites')),
+      if ((_ovpnFilter == 'Favourites' || _ovpnFilter == 'Working') &&
+          pool.isEmpty)
+        _OvpnWidget(_emptyFilterText(_ovpnFilter)),
     ];
     for (final country in filtered) {
       final servers = groups[country]!;
@@ -755,6 +763,8 @@ class ServersScreenState extends State<ServersScreen> {
   /// Servers matching the active Stealth filter chip.
   List<VpnServer> _filteredStealth(List<VpnServer> all) {
     switch (_stealthFilter) {
+      case 'Working':
+        return workingServers(all, widget.health);
       case 'Custom':
         return all.where((s) => s.source == 'custom').toList();
       case 'Private':
@@ -794,7 +804,8 @@ class ServersScreenState extends State<ServersScreen> {
     final measured =
         servers.where((s) => widget.health.isWorking(s.id) != null).length;
     if (measured * 2 < servers.length) {
-      await widget.health.checkMissing(servers.take(60).toList());
+      await widget.health
+          .checkMissing(servers.take(60).toList(), priority: true);
     }
     // Dead servers are excluded — unless every candidate is dead.
     final candidates = aliveOrAll(_stealthCandidates(), widget.health);
@@ -879,6 +890,7 @@ class ServersScreenState extends State<ServersScreen> {
   Widget _stealthChips() {
     const filters = [
       'All',
+      'Working',
       'Reality',
       'Hysteria2',
       'TLS',
@@ -1133,7 +1145,10 @@ class ServersScreenState extends State<ServersScreen> {
 
   Widget _stealthList() {
     return ListenableBuilder(
-      listenable: Listenable.merge([widget.v2ray, widget.userLists]),
+      // Health included: the Working filter fills live as the
+      // background sweep lands verdicts.
+      listenable:
+          Listenable.merge([widget.v2ray, widget.userLists, widget.health]),
       builder: (context, _) {
         final v = widget.v2ray;
         if (v.loading && v.servers.isEmpty) {
@@ -1199,10 +1214,12 @@ class ServersScreenState extends State<ServersScreen> {
           _stealthChips(),
           _subscriptionsBlock(v),
         ];
-        if (_stealthFilter != 'All') {
+        if (_stealthFilter != 'All' && _stealthFilter != 'Working') {
           // Flat list of the servers matching the active filter.
           // Tier filters keep the shared fastest-first ordering;
-          // Recent is shown in recency order instead.
+          // Recent is shown in recency order instead. ('Working'
+          // takes the grouped path below, like 'All' — Shiv wants
+          // the working set country-wise, fastest first.)
           final matching = _stealthFilter == 'Recent'
               ? _recentOrdered(_filteredStealth(v.servers))
               : sortByHealthAndLatency(
@@ -1232,8 +1249,11 @@ class ServersScreenState extends State<ServersScreen> {
             ],
           );
         }
+        final groupedPool = _stealthFilter == 'Working'
+            ? workingServers(v.servers, widget.health)
+            : v.servers;
         final groups = <String, List<VpnServer>>{};
-        for (final s in v.servers) {
+        for (final s in groupedPool) {
           groups.putIfAbsent(s.country, () => []).add(s);
         }
         // Fastest first inside each country group.
@@ -1249,11 +1269,14 @@ class ServersScreenState extends State<ServersScreen> {
           padding: const EdgeInsets.all(12),
           children: [
             ...header,
-            for (var i = 0; i < filtered.length; i++)
-              _FadeIn(
-                index: i,
-                child: _countryGroup(filtered[i], groups[filtered[i]]!),
-              ),
+            if (_stealthFilter == 'Working' && groups.isEmpty)
+              _emptyFilterText('Working')
+            else
+              for (var i = 0; i < filtered.length; i++)
+                _FadeIn(
+                  index: i,
+                  child: _countryGroup(filtered[i], groups[filtered[i]]!),
+                ),
           ],
         );
       },
@@ -1263,10 +1286,16 @@ class ServersScreenState extends State<ServersScreen> {
   // ── shared widgets ──────────────────────────────────────────────
 
   /// The All / Favourites / Recent filter chips used by the Free
-  /// and OpenVPN tabs (the Stealth tab has its own chip row).
+  /// and OpenVPN tabs (the Stealth tab has its own chip row). The
+  /// OpenVPN tab also gets 'Working' — the auto-collected set of
+  /// servers the health checks have verified, country-grouped and
+  /// fastest-first like the full list (the Free tab's WARP entries
+  /// are anycast, always working, so the filter means nothing
+  /// there and is not offered).
   Widget _listFilterChips({
     required String current,
     required ValueChanged<String> onChanged,
+    bool includeWorking = false,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
@@ -1276,7 +1305,12 @@ class ServersScreenState extends State<ServersScreen> {
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
-            for (final f in const ['All', 'Favourites', 'Recent'])
+            for (final f in [
+              'All',
+              if (includeWorking) 'Working',
+              'Favourites',
+              'Recent',
+            ])
               Padding(
                 padding: const EdgeInsets.only(right: 8),
                 child: ChoiceChip(
@@ -1304,12 +1338,19 @@ class ServersScreenState extends State<ServersScreen> {
     ];
   }
 
-  /// Empty-state text for a Favourites/Recent filter with nothing
-  /// in it yet.
+  /// Empty-state text for a Favourites/Recent/Working filter with
+  /// nothing in it yet.
   Widget _emptyFilterText(String filter) {
-    final text = filter == 'Favourites'
-        ? 'No favourites yet.\nTap the star on any server to add it here.'
-        : 'No recent connections yet.\nServers you connect to will appear here.';
+    final text = switch (filter) {
+      'Favourites' =>
+        'No favourites yet.\nTap the star on any server to add it here.',
+      'Working' =>
+        'No working servers found yet.\nHealth checks run automatically '
+            'in the background — working servers will appear here as '
+            'they are found.',
+      _ =>
+        'No recent connections yet.\nServers you connect to will appear here.',
+    };
     return Padding(
       padding: const EdgeInsets.all(24),
       child: Center(

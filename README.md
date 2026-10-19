@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-v2.3.3%20OpenVPN%20Mega--Database-6C4CF1" alt="Release v2.3.3">
+  <img src="https://img.shields.io/badge/release-v2.3.4%20AdShield%20Embedded-6C4CF1" alt="Release v2.3.4">
   <img src="https://img.shields.io/badge/platform-Android%20%7C%20Android%20TV%20%7C%20Windows-3DDC84" alt="Platforms">
   <img src="https://img.shields.io/badge/built%20with-Flutter-02569B" alt="Built with Flutter">
   <img src="https://img.shields.io/badge/price-Free%20forever-success" alt="Free forever">
@@ -21,7 +21,7 @@
 
 A free VPN app for Android phones and Android TV, with a premium interface and three engines under one roof: WireGuard (Cloudflare WARP), OpenVPN, and Xray. IPChakra's speciality is its **Stealth mode** — modern censorship-resistant protocols (VLESS + Reality, Hysteria2, Trojan/TLS, Shadowsocks, VMess) with a connect system that only declares "Connected" after the tunnel has been *proven* to carry traffic with the DNS you chose.
 
-**Current release: v2.3.3 "OpenVPN Mega-Database"**
+**Current release: v2.3.4 "AdShield Embedded"**
 
 Made with ❤️ by Shiv
 
@@ -44,6 +44,50 @@ Most VPN apps show "Connected" the moment the tunnel service starts — even if 
 5. **Live attempt log.** Every step is narrated on the Home screen in plain English — which DNS is being tried, which failed, and the success line appears *before* the Connected state.
 6. **DNS you can audit.** Pick from 27 DNS providers in Settings (Cloudflare, Quad9, Control D, AdGuard, NextDNS, CleanBrowsing and more). The Home status card always shows the DNS **actually in use** — including when a fallback provider carried the connection instead of your pick.
 
+## AdShield: ad-blocking inside the VPN
+
+The Home screen carries an **AdShield** card with an animated on/off
+switch. When the switch is on, the VPN session's DNS carries
+ad-blocking — the ~254,000-domain blocklist of the standalone
+AdShield v0.6.1 EXTREME (StevenBlack unified hosts, HaGeZi Multi
+PRO, uBlock Origin conversions, curated mobile ad-network lists,
+plus the streaming EXTREME pack covering SSAI middlemen like
+Google DAI/IMA, FreeWheel, SpotX, Innovid, SpringServe, Yospace and
+Amazon APS; suffix-deduped to 217,592 entries at build time — a
+block on `doubleclick.net` already covers `ads.doubleclick.net`,
+so children are dropped).
+
+Why no local port-53 filter: **Android allows only one VpnService
+at a time**, and IPChakra already owns it — and stock Android
+forbids binding ports below 1024, so an in-app process cannot
+answer DNS on port 53 at all. That is exactly why the standalone
+AdShield is a full VpnService of its own. Instead the blocking
+moves into the tunnel configurations:
+
+| Engine | How ads are blocked |
+|---|---|
+| **V2Ray (Stealth)** | The bundled list is injected into the core's DNS as `dns.hosts` entries (`"domain:<d>": "0.0.0.0"`); a `dns`-protocol outbound (`dns-out`) is added and two routing rules steer lookups — port 53 goes to `dns-out` (blocked names resolve to `0.0.0.0`, the rest forwards to the attempt's upstream), while the core's own upstream queries ride the proxy tunnel instead of looping back. Applied on every attempt, including the Tier-3 default-DNS one. |
+| **WireGuard (Free)** | The generated config's `DNS` line is switched to an ad-blocking provider (AdGuard DNS by default, or your pick if you already chose an ad-blocking provider in Settings) — the provider filters at DNS inside the tunnel. |
+| **OpenVPN** | The config gains `pull-filter ignore "dhcp-option DNS"` (a server pushing its own DNS cannot bypass the override) plus `dhcp-option DNS` lines for the ad-blocking provider. |
+
+There is deliberately **no live "N ads blocked" counter**: nothing
+in this architecture can measure per-query blocks, and the UI never
+shows a number it cannot prove. The card instead shows the bundled
+list's size — the number of ad domains blocked at DNS for V2Ray
+sessions.
+
+Honest limits, by design:
+
+- The switch applies to the **next** connection; flipping it
+  mid-session changes nothing until you reconnect.
+- Apps doing their own DNS-over-HTTPS/TLS bypass DNS filtering
+  entirely — the same limit the standalone AdShield has.
+- The injection never breaks a connect: a malformed config passes
+  through unchanged, and with the switch off behaviour is byte-for-
+  byte what it was before.
+- Android-only: on other platforms the switch is disabled with a
+  note, and behaviour is unchanged.
+
 ## Server database
 
 The server lists live in this repository and update **without an app update**:
@@ -56,6 +100,7 @@ The server lists live in this repository and update **without an app update**:
 
 | Version | Date | Highlights |
 |---|---|---|
+| **2.3.4** | 2026-10-11 | **AdShield Embedded.** The AdShield ad-blocker now lives inside the app: one tap on the animated Home-screen switch blocks ads and trackers at the VPN session's DNS — no second app, no second VPN profile. V2Ray sessions get the full ~254,000-domain list (StevenBlack + HaGeZi Multi PRO + uBlock + curated ad-network lists, streaming EXTREME pack on) injected into the core's DNS; WireGuard/OpenVPN sessions switch to an ad-blocking DNS provider. The card shows the list size honestly — there is no fake per-query counter — and an animated connect button sweep while connecting. |
 | **2.3.3** | 2026-10-11 | **OpenVPN Mega-Database.** The OpenVPN list grows from ~290 to ≈5,128 entries — the VPNGate rolling pool (hourly bot pool of ~4,900 servers, fetched via a cheap change-index and parsed off the UI thread), a handshake-verified liveness overlay, and VPNBook in four protocol variants. Stealth country grouping restored (full ISO country detection; flags, codes, English and Chinese names). Switching modes no longer disconnects a live VPN — the engine hand-over happens only when you tap Connect in another mode. The WireGuard notification is now an ongoing foreground-service notification that cannot be swiped away while connected. |
 | 2.3.2 | 2026-10-11 | **Layout fix.** Server names render on one line again (a unified hand-built server tile replaces the ListTile rows whose trailing buttons starved the name of width), with rendered-geometry regression tests. |
 | 2.3.1 | 2026-10-11 | **Batch B.** Favourites, recents and fastest-by-country picks; subscription import by URL; config sharing with QR codes; IPv6 leak hardening across all three engines. |

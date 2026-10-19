@@ -37,6 +37,47 @@ String hardenOpenVpnConfig(String config) {
       '$config';
 }
 
+/// Point an OpenVPN configuration at an ad-blocking DNS provider
+/// (AdShield, v2.3.4 rework): strip any `dhcp-option DNS` lines the
+/// config already carries (server-bundled or previously injected),
+/// then add a `pull-filter` that ignores server-pushed DNS options
+/// and one `dhcp-option DNS <ip>` per address in [servers]. Without
+/// the pull-filter, a server pushing its own DNS would silently
+/// route name resolution around the override. `dhcp-option DNS6`
+/// lines are not the filter's business and are left alone.
+/// Idempotent: applying twice leaves exactly one copy of each added
+/// line. Pure — unit-tested.
+String applyAdShieldOpenVpnDns(String config, List<String> servers) {
+  final kept = <String>[];
+  for (final line in config.split('\n')) {
+    final t = line.trimLeft();
+    // Our own previously added lines are re-added below, exactly
+    // once — this keeps the transform idempotent.
+    if (t.startsWith('# IPChakra: AdShield')) continue;
+    if (RegExp(r'^dhcp-option\s+DNS\b', caseSensitive: false)
+        .hasMatch(t)) {
+      continue; // re-added below, exactly once
+    }
+    if (RegExp(r'^pull-filter\s+ignore\s+"dhcp-option DNS"',
+            caseSensitive: false)
+        .hasMatch(t)) {
+      continue; // re-added below, exactly once
+    }
+    kept.add(line);
+  }
+  final buf = StringBuffer(kept.join('\n'));
+  if (!buf.toString().endsWith('\n')) buf.writeln();
+  buf.writeln(
+      '# IPChakra: AdShield DNS — the tunnel uses an ad-blocking '
+      'DNS provider.');
+  buf.writeln('pull-filter ignore "dhcp-option DNS"');
+  for (final server in servers) {
+    final ip = server.trim();
+    if (ip.isNotEmpty) buf.writeln('dhcp-option DNS $ip');
+  }
+  return buf.toString();
+}
+
 /// Pin an Xray configuration's direct egress to IPv4.
 ///
 /// What the bundled core does by default, from the configuration

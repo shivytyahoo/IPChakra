@@ -192,19 +192,17 @@ void main() {
     () async {
       final wg = FakeWireGuard();
       final vpn = VpnController(WarpService(), wgEngine: wg)
-        ..debugForceAndroid = true;
+        ..debugForceAndroid = true
+        ..debugAttemptDeadline = const Duration(seconds: 2);
       final serverA = stealthServer('seq-a');
       final serverB = stealthServer('seq-b');
       var starts = 0;
-      var verifyCalls = 0;
       onV2rayCall = (method) {
         if (method != 'startV2Ray') return;
         starts++;
         if (starts == 1) {
-          // Attempt A's core comes up.
-          Future<void>.delayed(const Duration(milliseconds: 60), () {
-            vpn.debugV2rayStatus('CONNECTED');
-          });
+          // Attempt A's core never comes up — the attempt fails
+          // on its (shortened) deadline and is torn down.
         } else if (starts == 2) {
           // Attempt B has claimed the engine and is starting. NOW
           // the DISCONNECTED echo of the controller's own teardown
@@ -217,11 +215,10 @@ void main() {
           });
         }
       };
-      vpn.debugComboVerifier = (_) async => ++verifyCalls > 1;
       await vpn
           .connectStealthAuto([serverA, serverB])
           .timeout(const Duration(seconds: 60));
-      expect(starts, 2, reason: 'both combinations were attempted');
+      expect(starts, 2, reason: 'both servers were attempted');
       expect(vpn.state, VpnState.connected,
           reason: 'attempt B survives the stale echo and connects');
       expect(vpn.currentServer?.id, serverB.id);
@@ -275,28 +272,28 @@ void main() {
     () async {
       final wg = FakeWireGuard();
       final vpn = VpnController(WarpService(), wgEngine: wg)
-        ..debugForceAndroid = true;
+        ..debugForceAndroid = true
+        ..debugAttemptDeadline = const Duration(seconds: 2);
       final servers = [
         stealthServer('run-1'),
         stealthServer('run-2'),
         stealthServer('run-3'),
       ];
       var starts = 0;
-      var verifyCalls = 0;
       onV2rayCall = (method) {
         if (method != 'startV2Ray') return;
         starts++;
-        // Every attempt's core comes up; verification decides.
+        // The first two cores never come up (their attempts fail
+        // on the shortened deadline); the third one does.
+        if (starts < 3) return;
         Future<void>.delayed(const Duration(milliseconds: 60), () {
           vpn.debugV2rayStatus('CONNECTED');
         });
       };
-      vpn.debugComboVerifier = (_) async => ++verifyCalls >= 3;
       await vpn
           .connectStealthAuto(servers)
           .timeout(const Duration(seconds: 90));
       expect(starts, 3);
-      expect(verifyCalls, 3);
       expect(vpn.state, VpnState.connected);
       expect(vpn.currentServer?.id, 'run-3');
       expect(vpn.errorMsg, isNull);

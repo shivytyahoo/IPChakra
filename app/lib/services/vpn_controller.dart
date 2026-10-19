@@ -10,6 +10,7 @@ import 'package:wireguard_flutter/wireguard_flutter.dart';
 import 'package:wireguard_flutter/wireguard_flutter_platform_interface.dart';
 import '../core/net.dart';
 import '../models/vpn_server.dart';
+import 'adshield_service.dart';
 import 'dns_combo.dart';
 import 'dns_service.dart';
 import 'hysteria_config.dart';
@@ -173,6 +174,16 @@ bool isSelfStopEcho({required DateTime? issuedAt, required DateTime now}) =>
     !now.isBefore(issuedAt) &&
     now.difference(issuedAt) <= selfStopEchoWindow;
 
+/// Whether a native V2Ray connection-state string — from the
+/// plugin's pull-based ground-truth query (PATCHES.md, Patch 3) —
+/// means the core is up. The query exists because the status
+/// EVENT can be missed on device; this parser is the exact rule
+/// the attempt machinery polls with. Pure function — unit-tested.
+bool isNativeV2rayConnected(String? state) {
+  final s = state?.toUpperCase();
+  return s == 'V2RAY_CONNECTED' || s == 'CONNECTED';
+}
+
 /// What one native engine reports about its own tunnel right now,
 /// from a synchronous ground-truth query (never from a cached
 /// event): the tunnel is verifiably [up], verifiably [down], or
@@ -248,6 +259,11 @@ class VpnController extends ChangeNotifier {
   /// tests and headless uses run without it.
   final UserListsService? userLists;
 
+  /// The embedded AdShield DNS ad-blocking, when the app wired one
+  /// in. Optional: tests and headless uses run without it, and it
+  /// is Android-only (see [_adShieldWanted]).
+  final AdShieldService? adShield;
+
   VpnState state = VpnState.disconnected;
   AppMode mode = AppMode.free;
   VpnServer? currentServer;
@@ -260,14 +276,15 @@ class VpnController extends ChangeNotifier {
   /// is the provider of the (server, DNS) combination that passed
   /// through-tunnel verification — the user's selected provider
   /// when it worked, the fallback provider when it did not. For
-  /// Free (WireGuard) it is the selected provider, which is
-  /// written into the tunnel configuration at connect time and is
-  /// therefore effective by construction. OpenVPN sessions leave
-  /// it null: those servers push their own DNS, which the app can
-  /// neither override nor read back. It is cleared on every
-  /// teardown path (disconnect, native stop, failure,
-  /// reconciliation) alongside [currentServer] and [currentIp],
-  /// so a dead session's DNS can never be attributed to a new one.
+  /// Free (WireGuard) it is the provider written into the tunnel
+  /// configuration at connect time, which is effective by
+  /// construction. For OpenVPN it is the provider the app forced
+  /// onto the tunnel (server pushes are filtered out). When
+  /// AdShield is wanted, it is the ad-blocking provider the
+  /// session actually used. It is cleared on every teardown path
+  /// (disconnect, native stop, failure, reconciliation) alongside
+  /// [currentServer] and [currentIp], so a dead session's DNS can
+  /// never be attributed to a new one.
   DnsProvider? effectiveDns;
 
   /// Latest traffic/status snapshot reported by the V2Ray engine.
@@ -289,10 +306,81 @@ class VpnController extends ChangeNotifier {
   /// overriding the persisted selection (combination search).
   DnsProvider? _dnsOverride;
 
+  /// Whether the live session's DNS carries the AdShield
+  /// treatment. Decided per attempt in [_connectOnce] and read by
+  /// the engine connect paths; cleared on every teardown alongside
+  /// the session fields.
+  bool _adShieldActive = false;
+
+  /// Whether the attempt log already carries the AdShield line for
+  /// the current session — so a stealth combination search
+  /// narrates it once, not once per combination. Reset with the
+  /// attempt log on every fresh user intent.
+  bool _adShieldNarrated = false;
+
+  /// Whether the live session's DNS is carrying the AdShield
+  /// treatment. The Home screen's DNS row reads this to say so
+  /// honestly.
+  bool get adShieldActive => _adShieldActive;
+
+  /// Whether a new session wants the AdShield DNS treatment:
+  /// Android only (the treatment lives in the tunnel
+  /// configurations, which only the Android engines consume), and
+  /// only when the user left the switch on.
+  bool get _adShieldWanted => _isAndroid && (adShield?.enabled ?? false);
+
+  /// Decide the AdShield treatment for the attempt that is about to
+  /// begin, and narrate it once per session in the attempt log.
+  ///
+  /// The treatment itself is applied inside the engine connect
+  /// paths below (the Xray hosts injection on V2Ray, an
+  /// ad-blocking DNS provider on WireGuard/OpenVPN) — no socket is
+  /// started, so there is no failure mode: the flag simply records
+  /// whether the session wants it.
+  void _decideAdShield() {
+    _adShieldActive = _adShieldWanted;
+    if (_adShieldActive && !_adShieldNarrated) {
+      _adShieldNarrated = true;
+      _logLine('AdShield is on for this session — ads and trackers '
+          'are blocked at DNS.');
+    }
+  }
+
   /// Exit address measured just before the current stealth attempt
   /// started; the verification gate compares the tunnel's exit
   /// against it.
   String? _lastBaselineIp;
+
+  /// When the baseline measurement was last STARTED. One search
+  /// tries several combinations back to back; the direct address
+  /// does not change between them, so a fresh-enough measurement
+  /// is reused instead of paying a full exit-address fetch (up to
+  /// 8 s when the service is slow) before EVERY attempt — and a
+  /// re-measurement taken while a previous attempt's tunnel is
+  /// still draining could even mistake the tunnel's own exit for
+  /// the baseline and reject the next working combination. The
+  /// stamp marks the attempt, not the result: a fetch that timed
+  /// out (null baseline — verification then accepts any fetched
+  /// exit) is cached too, so a slow exit-address service can
+  /// never tax every attempt in the search.
+  DateTime? _baselineCapturedAt;
+  static const _baselineReuseWindow = Duration(minutes: 5);
+
+  /// Refresh the pre-connect baseline address, unless a fresh
+  /// measurement already exists. Runs concurrently with the engine
+  /// start (see [_connectOnce]) — the app's own traffic never
+  /// traverses the tunnel, so the direct address stays the direct
+  /// address while the tunnel comes up, and a slow exit-address
+  /// service can no longer eat the attempt's tunnel-up deadline.
+  Future<void> _refreshBaseline() async {
+    final capturedAt = _baselineCapturedAt;
+    if (capturedAt != null &&
+        DateTime.now().difference(capturedAt) <= _baselineReuseWindow) {
+      return;
+    }
+    _baselineCapturedAt = DateTime.now();
+    _lastBaselineIp = await _safeIp();
+  }
 
   void _setStatusNote(String? note) {
     statusNote = note;
@@ -386,6 +474,32 @@ class VpnController extends ChangeNotifier {
 
   bool get _isAndroid => debugForceAndroid || Platform.isAndroid;
 
+  /// Test-only seam: the native V2Ray state the ground-truth
+  /// query reports, bypassing the plugin channel entirely.
+  @visibleForTesting
+  String? debugNativeV2rayState;
+
+  /// The V2Ray core's own current state, asked directly (the
+  /// plugin's Patch-3 ground-truth query) instead of inferred
+  /// from status events — events can be missed or throttled on
+  /// device, and a connect attempt that waits only for the event
+  /// then dies at its deadline over a tunnel that is actually up.
+  Future<String?> _v2rayNativeState() async {
+    final seam = debugNativeV2rayState;
+    if (seam != null) return seam;
+    try {
+      return await _v2ray
+          .getConnectionState()
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Whether the native side says the V2Ray core is up right now.
+  Future<bool> _v2rayNativeConnected() async =>
+      isNativeV2rayConnected(await _v2rayNativeState());
+
   /// Test-only seam: deliver a V2Ray status event with the given
   /// state string ('CONNECTED', 'DISCONNECTED', …) exactly as the
   /// plugin's status channel delivers it.
@@ -443,6 +557,25 @@ class VpnController extends ChangeNotifier {
   /// connected, and not given up.
   bool _healing = false;
 
+  /// Whether a stealth SEARCH (Auto or manual escalation) is
+  /// running. While true, the search's internal machinery — the
+  /// between-attempt teardowns and per-attempt failures — is
+  /// presented as one continuous [VpnState.connecting] (see
+  /// [_setState]): the user asked for all of that to happen in the
+  /// background, with the public state moving only when a stable
+  /// combination is found (Connected) or the search gives up (its
+  /// final failure, which clears this flag before writing). Before
+  /// this, every failed combination visibly dropped the app to
+  /// Disconnected and the next one raised it again — the
+  /// connect/disconnect flicker reported on device.
+  bool _searchHeld = false;
+
+  /// Set when an attempt fails while a presentation is held
+  /// (search or heal): the public error state is held back, so
+  /// the combo loop polls this flag for its fail-fast signal
+  /// instead of watching the public state.
+  bool _searchAttemptFailed = false;
+
   /// The live attempt log shown on Home during a stealth connect
   /// or heal: one short English line per step, in order ("Trying …",
   /// "… did not answer through the tunnel.", "Connection stable —
@@ -466,6 +599,7 @@ class VpnController extends ChangeNotifier {
   }
 
   void _clearAttemptLog() {
+    _adShieldNarrated = false;
     if (_attemptLog.isEmpty) return;
     _attemptLog.clear();
     notifyListeners();
@@ -497,18 +631,31 @@ class VpnController extends ChangeNotifier {
   static const _autoAttemptDeadline = Duration(seconds: 12);
 
   /// Stability gate parameters (see [stabilityGatePassed]): two
-  /// further probes through the verified tunnel, spaced a few
-  /// seconds apart, both of which must answer with the same exit
-  /// address before Connected may be shown.
+  /// further probes through the verified tunnel, spaced a second
+  /// apart, both of which must answer with the same exit address
+  /// before Connected may be shown. The spacing used to be 3 s —
+  /// with two probes and a verification on top it added up to
+  /// ~20 s of gate time per combination, a big part of why a
+  /// connect felt like it took forever; the gate's protection
+  /// comes from re-probing through the tunnel at all, not from
+  /// the length of the pause between probes.
   static const stabilityProbeCount = 2;
-  static const stabilityProbeSpacing = Duration(seconds: 3);
+  static const stabilityProbeSpacing = Duration(seconds: 1);
 
   /// Session watchdog parameters: while a Stealth session is
   /// connected, a cheap through-tunnel liveness probe runs at this
   /// interval; this many consecutive failures declare the tunnel
-  /// silently dead and start a self-heal on the same server.
-  static const watchdogInterval = Duration(seconds: 25);
-  static const watchdogFailureThreshold = 2;
+  /// silently dead and start a self-heal on the same server. The
+  /// threshold used to be 2 at 25 s: on marginal free servers a
+  /// single bad minute — a throttled IP-echo service, a resolver
+  /// hiccup — was enough to tear down a session that was carrying
+  /// traffic fine, and the heal's own churn read on device as
+  /// connect/disconnect flapping. Three strikes at 30 s, with a
+  /// probe that only counts total silence as failure (see
+  /// [sessionCarriesTraffic]), keeps real death detection while
+  /// leaving healthy-but-rough sessions alone.
+  static const watchdogInterval = Duration(seconds: 30);
+  static const watchdogFailureThreshold = 3;
 
   Timer? _watchdogTimer;
   int _watchdogFailures = 0;
@@ -540,6 +687,12 @@ class VpnController extends ChangeNotifier {
   /// Test-only seam: shrink the stability probe spacing.
   @visibleForTesting
   Duration? debugStabilitySpacing;
+
+  /// Test-only seam: shrink the per-attempt deadlines (manual
+  /// and Auto) so failure-path tests do not wait out the real
+  /// budgets.
+  @visibleForTesting
+  Duration? debugAttemptDeadline;
 
   /// Test-only seam: shrink the watchdog interval.
   @visibleForTesting
@@ -592,6 +745,7 @@ class VpnController extends ChangeNotifier {
     this.warp, {
     WireGuardFlutterInterface? wgEngine,
     this.userLists,
+    this.adShield,
   }) : _wg = wgEngine ?? WireGuardFlutter.instance {
     _ovpn = OpenVPN(onVpnStageChanged: _onOvpnStage);
     _v2ray = V2ray(onStatusChanged: _onV2rayStatus);
@@ -730,23 +884,29 @@ class VpnController extends ChangeNotifier {
   DateTime? _connectingSince;
 
   void _setState(VpnState s) {
-    // While a self-heal is running, the escalation ladder drives
-    // the same attempt machinery as a fresh connect; its
-    // connecting/disconnecting writes — and the disconnected
-    // write of its internal between-attempt teardowns — are
-    // presented as [VpnState.reconnecting] so the UI keeps saying
-    // "this live session is being restored" instead of flickering
-    // through fresh-connect states. Every path that ENDS a heal
-    // clears _healing before its own final state write (the heal
-    // ladder when it gives up, a user disconnect, a native stop),
-    // and the success write (connected) and failure write (error)
-    // are never remapped, so a terminal state is never masked.
+    // While a self-heal or a stealth search is running, the
+    // machinery drives the same attempt code as a fresh connect;
+    // its internal writes — the connecting/disconnecting churn,
+    // the disconnected write of a between-attempt teardown, and a
+    // per-attempt error — are all background activity and are
+    // presented as the one held state ([VpnState.reconnecting] for
+    // a heal, [VpnState.connecting] for a search) so the UI never
+    // flickers connect/disconnect/error while combinations are
+    // being tried. Every path that ENDS the hold clears it before
+    // its own final state write (the ladders when they give up, a
+    // user disconnect, a native stop), and the success write
+    // (connected) is never remapped, so a terminal state is never
+    // masked.
     var effective = s;
-    if (_healing &&
+    final held = _healing
+        ? VpnState.reconnecting
+        : (_searchHeld ? VpnState.connecting : null);
+    if (held != null &&
         (s == VpnState.connecting ||
             s == VpnState.disconnecting ||
-            s == VpnState.disconnected)) {
-      effective = VpnState.reconnecting;
+            s == VpnState.disconnected ||
+            s == VpnState.error)) {
+      effective = held;
     }
     if (effective == VpnState.connecting &&
         state != VpnState.connecting) {
@@ -819,6 +979,20 @@ class VpnController extends ChangeNotifier {
 
   void _fail(String msg) {
     _stopWatchdog();
+    // A failed session's counting forwarder stops too; its real
+    // totals stay on the card until the next session.
+    unawaited(adShield?.stopCounting());
+    // While a search/heal presentation is held, a per-attempt
+    // failure is background machinery: record it as the combo
+    // loop's fail-fast signal instead of surfacing an error the
+    // next attempt would have to clear. The search's own final
+    // failure clears the hold before calling this, so it still
+    // lands as a real error.
+    if (_healing || _searchHeld) _searchAttemptFailed = true;
+    // A failed attempt has no live session, so it has no DNS
+    // treatment either — never leave a previous session's record
+    // behind an error state.
+    _adShieldActive = false;
     errorMsg = msg;
     // A failed attempt has no live session, so it has no DNS in
     // use either — never leave a previous session's provider
@@ -835,11 +1009,10 @@ class VpnController extends ChangeNotifier {
 
   // ── connect / disconnect ────────────────────────────────────────
 
-  /// Connect to [server]. Stealth (V2Ray) servers go through the
-  /// verified (server, DNS) combination flow — a stealth tunnel is
-  /// only ever reported connected after real traffic and real name
-  /// resolution have been proven through it. Every other engine
-  /// connects directly, exactly as before.
+  /// Connect to [server]. Stealth (V2Ray) servers take the simple
+  /// single-attempt flow — the server with the core's own DNS, no
+  /// combination machinery (see [_connectStealthSimple]). Every
+  /// other engine connects directly, exactly as before.
   Future<void> connect(VpnServer server) async {
     // A fresh user connect is a new intent: any stealth search loop
     // still running from an earlier tap aborts at its next check.
@@ -847,7 +1020,7 @@ class VpnController extends ChangeNotifier {
     // A fresh connect starts a fresh attempt log.
     _clearAttemptLog();
     if (server.protocol == 'v2ray') {
-      await _connectStealthVerified(server);
+      await _connectStealthSimple(server);
       return;
     }
     await _connectOnce(server);
@@ -881,9 +1054,24 @@ class VpnController extends ChangeNotifier {
     effectiveDns = null;
     _setState(VpnState.connecting);
 
-    // Verify ke liye connect se pehle wala IP.
-    final ipBefore = await _safeIp();
-    _lastBaselineIp = ipBefore;
+    // AdShield: decide the DNS treatment before the native engine
+    // starts — the engine connect paths apply it inside the tunnel
+    // configuration they hand over.
+    _decideAdShield();
+    if (!_isCurrent(myAttempt)) return false;
+
+    // The pre-connect baseline address, fetched CONCURRENTLY with
+    // the engine start — never awaited before it. Awaiting it here
+    // used to put a full exit-address fetch (up to 8 s when the
+    // service stalls, e.g. on a blackholed IPv6 route) in front of
+    // every attempt, inside the attempt's own tunnel-up deadline:
+    // the tunnel then "did not come up" on attempt after attempt
+    // while only the DNS changed — the total connect failure
+    // reported on device. Verification reads [_lastBaselineIp]
+    // when it runs (by then the fetch has normally landed; if it
+    // has not, the baseline is simply unknown and any exit fetched
+    // through the tunnel is accepted).
+    unawaited(_refreshBaseline());
 
     try {
       await _startEngine(server).timeout(_opTimeout);
@@ -903,7 +1091,7 @@ class VpnController extends ChangeNotifier {
       return true;
     }
 
-    final ok = await _waitForConnected(myAttempt, ipBefore);
+    final ok = await _waitForConnected(myAttempt, _lastBaselineIp);
     if (!_isCurrent(myAttempt)) return false;
     if (ok) {
       _markConnected();
@@ -926,16 +1114,20 @@ class VpnController extends ChangeNotifier {
       final ok = await verifierOverride(dns);
       // Model the production verifier's side effect — recording
       // the tunnel exit it observed — when a test provides one, so
-      // the stability gate's exit-stability check has something
-      // real to compare against.
+      // the stability gate knows a verified exit exists.
       if (ok && debugVerifiedExitIp != null) {
         currentIp = debugVerifiedExitIp;
       }
       return ok;
     }
     try {
+      // The verifier's own checks run concurrently now, but a
+      // free server can still legitimately need several seconds
+      // to answer both; the budget must cover that, or working
+      // combinations get rejected for slowness alone (the 5 s
+      // budget did exactly that).
       final result = await TunnelVerifier.verify(resolverIp: dns.primary)
-          .timeout(const Duration(seconds: 8));
+          .timeout(const Duration(seconds: 10));
       final ok = comboVerified(
         dnsOk: result.dnsOk,
         fetchOk: result.exitIp != null,
@@ -968,7 +1160,11 @@ class VpnController extends ChangeNotifier {
     }
     try {
       final result = await TunnelVerifier.verify(resolverIp: dns.primary)
-          .timeout(const Duration(seconds: 8));
+          .timeout(const Duration(seconds: 10));
+      // The session's address follows the latest observed exit:
+      // multi-exit servers legitimately rotate egress addresses,
+      // and the card should name the current one.
+      if (result.exitIp != null) currentIp = result.exitIp;
       return (dnsOk: result.dnsOk, exitIp: result.exitIp);
     } catch (_) {
       return (dnsOk: false, exitIp: null);
@@ -977,8 +1173,9 @@ class VpnController extends ChangeNotifier {
 
   /// Run the stability gate for a just-verified combination:
   /// [stabilityProbeCount] further probes, spaced apart, all of
-  /// which must answer through the tunnel with the verification's
-  /// own exit address (see [stabilityGatePassed]).
+  /// which must answer through the tunnel with a DNS answer and an
+  /// exit fetch (see [stabilityGatePassed] — the exit address may
+  /// move between probes on multi-exit servers).
   Future<bool> _passesStabilityGate({
     required DnsProvider dns,
     required String? verifiedExitIp,
@@ -1016,31 +1213,15 @@ class VpnController extends ChangeNotifier {
   void _confirmStealthConnected(DnsProvider dns) {
     _stealthGateHeld = false;
     _gatedTunnelUp = false;
-    effectiveDns = dns;
+    // The session's DNS when AdShield is wanted is the ad-blocking
+    // provider the attempt actually used — that is what the Home
+    // DNS row names.
+    effectiveDns =
+        _adShieldActive ? AdShieldService.adBlockingProvider(dns) : dns;
     connectedAt ??= DateTime.now();
     _setState(VpnState.connected);
     _recordSuccessfulConnect();
     _startWatchdog();
-  }
-
-  /// The honest note shown when a session connected with a DNS
-  /// other than the user's selected provider.
-  String _fallbackNote(
-    DnsProvider dns,
-    DnsProvider selected, {
-    required bool manual,
-  }) {
-    final where = manual ? 'with this server' : 'on this network';
-    if (DnsService.isDefaultDns(dns)) {
-      return 'Connected with the default DNS because the selected '
-          'DNS (${selected.name}) did not work $where.';
-    }
-    // Provider names that already end in "DNS" ("Google Public
-    // DNS") take no suffix; the rest read naturally with one.
-    final winner =
-        dns.name.endsWith('DNS') ? dns.name : '${dns.name} DNS';
-    return 'Connected with $winner because the selected DNS '
-        '(${selected.name}) did not work $where.';
   }
 
   /// One gated stealth attempt: start (server, [dns]) behind the
@@ -1064,6 +1245,7 @@ class VpnController extends ChangeNotifier {
     final label = _dnsAttemptLabel(dns);
     _dnsOverride = dns;
     _gatedTunnelUp = false;
+    _searchAttemptFailed = false;
     if (note != null) _setStatusNote(note);
     _logLine('Trying ${server.name} with $label…');
 
@@ -1076,6 +1258,7 @@ class VpnController extends ChangeNotifier {
 
     final watch = Stopwatch()..start();
     var up = false;
+    var lastNativePollMs = -1000;
     while (watch.elapsed < deadline) {
       // The user's disconnect wins instantly, not at the deadline.
       if (!alive()) return false;
@@ -1083,11 +1266,27 @@ class VpnController extends ChangeNotifier {
         up = true;
         break;
       }
+      // The tunnel-up signal above rides the plugin's status
+      // EVENT, which can be missed or throttled on device — when
+      // it is, this loop used to watch a live tunnel time out,
+      // attempt after attempt. Poll the native ground truth
+      // (Patch 3) alongside: a core the native side itself
+      // reports CONNECTED is up, event or no event.
+      if (watch.elapsedMilliseconds - lastNativePollMs >= 1000) {
+        lastNativePollMs = watch.elapsedMilliseconds;
+        if (await _v2rayNativeConnected()) {
+          _gatedTunnelUp = true;
+          up = true;
+          break;
+        }
+      }
       // Fail fast on a real error from this attempt. Errors are
       // only trusted after a short grace period so a stale error
       // state from a previous attempt cannot abort this one
-      // instantly.
-      if (state == VpnState.error &&
+      // instantly. While a presentation is held the error never
+      // reaches the public state — the loop watches the failure
+      // flag _fail set instead.
+      if ((_searchAttemptFailed || state == VpnState.error) &&
           watch.elapsed > const Duration(milliseconds: 1500)) {
         break;
       }
@@ -1097,7 +1296,15 @@ class VpnController extends ChangeNotifier {
     if (!alive()) return false;
 
     if (!up) {
-      _logLine('The tunnel did not come up with $label.');
+      // Name the engine's own state in the log: CONNECTING means
+      // the core never finished starting (its start failed
+      // silently on the native side), DISCONNECTED means it died
+      // — the distinction decides where a failure report points.
+      final nativeState = await _v2rayNativeState();
+      _logLine(nativeState == null
+          ? 'The tunnel did not come up with $label.'
+          : 'The tunnel did not come up with $label '
+              '(engine state: ${nativeState.replaceFirst('V2RAY_', '').toLowerCase()}).');
       await _disconnect(userIntent: false);
       return false;
     }
@@ -1144,56 +1351,114 @@ class VpnController extends ChangeNotifier {
   /// default DNS treatment (see [manualEscalationAttempts]).
   /// "Connected" is declared only for a combination that passed
   /// verification and the stability gate.
-  Future<void> _connectStealthVerified(VpnServer server) async {
+  /// One stealth attempt against ONE server, with no DNS
+  /// dimension at all (2026-10-11, Shiv's order after the
+  /// combination machinery repeatedly failed on his device): the
+  /// configuration carries no custom DNS treatment — the core's
+  /// own default DNS handling applies, exactly as in a standard
+  /// client — and the attempt succeeds the moment the engine
+  /// reports its tunnel up, through the status event or the
+  /// native ground-truth poll. Returns true when the session is
+  /// now Connected with [server]. Every failure is logged in
+  /// plain English (with the engine's own state, when known) and
+  /// the attempt is torn down cleanly.
+  Future<bool> _attemptStealthServer({
+    required VpnServer server,
+    required bool Function() alive,
+    required Duration deadline,
+    String? note,
+  }) async {
+    _dnsOverride = DnsService.defaultDns;
+    _searchAttemptFailed = false;
+    if (note != null) _setStatusNote(note);
+    _logLine('Trying ${server.name}…');
+
+    final f = _connectOnce(server);
+    unawaited(f.then((_) {}, onError: (_) {}));
+
+    final watch = Stopwatch()..start();
+    var lastNativePollMs = -1000;
+    while (watch.elapsed < deadline) {
+      if (!alive()) return false;
+      if (state == VpnState.connected &&
+          currentServer?.id == server.id) {
+        return true;
+      }
+      // Fail fast on a real error from this attempt (same grace
+      // rule as the old combination loop).
+      if ((_searchAttemptFailed || state == VpnState.error) &&
+          watch.elapsed > const Duration(milliseconds: 1500)) {
+        break;
+      }
+      // Poll the native ground truth alongside the status event:
+      // when the core is up but the event (or the raw flow's own
+      // slower wait) has not landed yet, confirm the session
+      // through the normal connected bookkeeping.
+      if (watch.elapsedMilliseconds - lastNativePollMs >= 1000) {
+        lastNativePollMs = watch.elapsedMilliseconds;
+        if (currentServer?.id == server.id &&
+            await _v2rayNativeConnected()) {
+          _markConnected();
+          if (state == VpnState.connected) return true;
+        }
+      }
+      await Future.delayed(const Duration(milliseconds: 250));
+    }
+    if (state == VpnState.connected && currentServer?.id == server.id) {
+      return true;
+    }
+    if (!alive()) return false;
+    final nativeState = await _v2rayNativeState();
+    _logLine(nativeState == null
+        ? '${server.name} did not connect.'
+        : '${server.name} did not connect '
+            '(engine state: ${nativeState.replaceFirst('V2RAY_', '').toLowerCase()}).');
+    await _disconnect(userIntent: false);
+    return false;
+  }
+
+  /// Manual stealth connect (2026-10-11 rework): ONE attempt on
+  /// the user's chosen server with the core's own DNS — no DNS
+  /// measurement, no provider escalation, no verification or
+  /// stability gate. The combination machinery that used to run
+  /// here never let a connection through on Shiv's device across
+  /// several fix rounds, so at his order it is disconnected from
+  /// the live path; its pure helpers remain in dns_combo.dart.
+  Future<void> _connectStealthSimple(VpnServer server) async {
     // Capture the operation session: if the user disconnects or
-    // starts a different connect while this search runs, the token
-    // moves on and this loop aborts at its next check — silently,
+    // starts a different connect while this runs, the token moves
+    // on and this flow aborts at its next check — silently,
     // because the user's action owns the state from then on.
     final session = ++_autoSession;
     _autoRunningSession = session;
     bool alive() =>
         autoShouldContinue(session: session, currentSession: _autoSession);
-    // The gate is held for the whole escalation: no attempt may
-    // show Connected before its verification + stability gate.
-    _stealthGateHeld = true;
     try {
-      final selected = await DnsService.loadSelected();
-      if (!alive()) return;
       dnsFallbackNote = null;
-      _setStatusNote('Finding the fastest DNS + server…');
-      final measured = await _measureProviders();
-      if (!alive()) return;
-      final attempts =
-          manualEscalationAttempts(selected: selected, measured: measured);
-      for (final dns in attempts) {
-        if (!alive()) return;
-        final connected = await _attemptStealthCombo(
-          server: server,
-          dns: dns,
-          alive: alive,
-          deadline: _manualAttemptDeadline,
-          heal: false,
-          note: 'Trying ${server.name} with ${_dnsAttemptLabel(dns)}…',
-        );
-        if (!alive()) return;
-        if (connected) {
-          if (dns.id != selected.id) {
-            dnsFallbackNote = _fallbackNote(dns, selected, manual: true);
-          }
-          _dnsOverride = null;
-          _setStatusNote(null);
-          return;
-        }
-      }
+      _setStatusNote('Connecting to ${server.name}…');
+      final connected = await _attemptStealthServer(
+        server: server,
+        alive: alive,
+        deadline: debugAttemptDeadline ?? _manualAttemptDeadline,
+      );
       if (!alive()) return;
       _dnsOverride = null;
       _setStatusNote(null);
-      _fail('This server could not be kept connected — not with the '
-          'selected DNS, not with any other measured DNS, and not '
-          'with the default DNS. Please try another server.');
+      if (connected) {
+        effectiveDns = DnsService.defaultDns;
+        _logLine('Connected with ${server.name}.');
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('stealth_last_good', server.id);
+        } catch (_) {
+          // Remembering the winner is best-effort only.
+        }
+        return;
+      }
+      _fail('${server.name} could not connect. '
+          'Please try another server.');
     } finally {
-      _stealthGateHeld = false;
-      _gatedTunnelUp = false;
+      _dnsOverride = null;
       if (_autoRunningSession == session) _autoRunningSession = null;
     }
   }
@@ -1217,7 +1482,13 @@ class VpnController extends ChangeNotifier {
       // between-attempt teardowns (userIntent false) touch
       // neither: the loop that owns them is still in charge.
       _healing = false;
+      _searchHeld = false;
+      errorMsg = null; // a user stop wipes the slate, errors too
       _clearAttemptLog();
+      // The counting forwarder belongs to the session: a user stop
+      // ends it (between-attempt teardowns must NOT — the next
+      // attempt re-points the same forwarder).
+      unawaited(adShield?.stopCounting());
     }
     _setState(VpnState.disconnecting);
     // Clear the session BEFORE stopping the engines: a native
@@ -1372,7 +1643,9 @@ class VpnController extends ChangeNotifier {
     // probes), never for a stop the native layer reported.
     _stopWatchdog();
     _healing = false;
+    _searchHeld = false;
     _clearAttemptLog();
+    unawaited(adShield?.stopCounting());
     currentServer = null;
     currentIp = null;
     connectedAt = null;
@@ -1443,11 +1716,13 @@ class VpnController extends ChangeNotifier {
   }
 
   /// Whether the live session still carries traffic, proven
-  /// through the tunnel's own SOCKS path (see [TunnelVerifier]):
-  /// a DNS answer from the session's resolver AND an exit-address
-  /// fetch. An exit address that merely CHANGED is not death (the
-  /// exit node may have re-resolved); the recorded address simply
-  /// follows it.
+  /// through the tunnel's own SOCKS path (see [TunnelVerifier]).
+  /// The verdict follows [sessionCarriesTraffic]: a DNS answer OR
+  /// an exit-address fetch is enough — either path alone can fail
+  /// on a healthy tunnel, and only total silence counts against
+  /// the session. An exit address that merely CHANGED is not
+  /// death (the exit node may have re-resolved); the recorded
+  /// address simply follows it.
   Future<bool> _probeSessionLiveness() async {
     final seam = debugWatchdogProbe;
     if (seam != null) return seam();
@@ -1460,8 +1735,13 @@ class VpnController extends ChangeNotifier {
     try {
       final result = await TunnelVerifier.verify(resolverIp: dns.primary)
           .timeout(const Duration(seconds: 10));
-      if (!result.dnsOk || result.exitIp == null) return false;
-      if (currentIp != null && result.exitIp != currentIp) {
+      if (!sessionCarriesTraffic(
+          dnsOk: result.dnsOk, exitIp: result.exitIp)) {
+        return false;
+      }
+      if (result.exitIp != null &&
+          currentIp != null &&
+          result.exitIp != currentIp) {
         currentIp = result.exitIp;
         notifyListeners();
       }
@@ -1601,10 +1881,14 @@ class VpnController extends ChangeNotifier {
     _autoRunningSession = session;
     bool alive() =>
         autoShouldContinue(session: session, currentSession: _autoSession);
-    // A fresh search starts a fresh attempt log, and holds the
-    // Connected gate for its whole run (see _attemptStealthCombo).
+    // A fresh search starts a fresh attempt log. The presentation
+    // is held for the whole run: one continuous Connecting state
+    // while the servers are tried in the background (the internal
+    // per-attempt churn never surfaces). There is no DNS
+    // dimension any more (2026-10-11 rework): each server is
+    // tried once, with the core's own DNS.
     _clearAttemptLog();
-    _stealthGateHeld = true;
+    _searchHeld = true;
     try {
       String? lastGoodId;
       try {
@@ -1620,86 +1904,44 @@ class VpnController extends ChangeNotifier {
           ...candidates.where((s) => s.id == lastGoodId),
         ...candidates.where((s) => s.id != lastGoodId),
       ];
+      final tried = ordered.length > 6 ? 6 : ordered.length;
 
       dnsFallbackNote = null;
-      _setStatusNote('Finding the fastest DNS + server…');
-      final selected = await DnsService.loadSelected();
-      final measured = await _measureProviders();
-      if (!alive()) return;
-      final dnsOrdered =
-          orderDnsCandidates(selected: selected, measured: measured);
-      final combos = buildDnsServerCombos(
-        servers: ordered,
-        dnsOrdered: dnsOrdered,
-        fallbackDns: selected,
-      );
-
-      // Shared success bookkeeping for whichever attempt wins:
-      // remember the winner for next time and note a DNS fallback
-      // honestly.
-      Future<void> onConnected(VpnServer server, DnsProvider dns) async {
-        if (dns.id != selected.id) {
-          dnsFallbackNote = _fallbackNote(dns, selected, manual: false);
-        }
-        try {
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.setString('stealth_last_good', server.id);
-        } catch (_) {
-          // Remembering the winner is best-effort only.
-        }
-        _dnsOverride = null;
-        _setStatusNote(null);
-      }
-
-      for (var i = 0; i < combos.length; i++) {
+      _setStatusNote('Finding a working server…');
+      for (var i = 0; i < tried; i++) {
         if (!alive()) return;
-        final (server, dns) = combos[i];
-        final connected = await _attemptStealthCombo(
+        final server = ordered[i];
+        final connected = await _attemptStealthServer(
           server: server,
-          dns: dns,
           alive: alive,
-          deadline: _autoAttemptDeadline,
-          heal: false,
-          note: 'Trying ${server.name} with ${dns.name} DNS '
-              '(${i + 1}/${combos.length})…',
+          deadline: debugAttemptDeadline ?? _autoAttemptDeadline,
+          note: 'Trying ${server.name} (${i + 1}/$tried)…',
         );
         if (!alive()) return;
         if (connected) {
-          await onConnected(server, dns);
+          effectiveDns = DnsService.defaultDns;
+          _logLine('Connected with ${server.name}.');
+          try {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('stealth_last_good', server.id);
+          } catch (_) {
+            // Remembering the winner is best-effort only.
+          }
+          _dnsOverride = null;
+          _setStatusNote(null);
           return;
         }
-      }
-
-      // Tier 3 (v2.2.0): before declaring total failure, one
-      // last-resort attempt on the best candidate with the default
-      // DNS treatment — no custom DNS object in the configuration
-      // at all. A network that defeats every named resolver can
-      // still carry this.
-      if (!alive()) return;
-      final bestServer = combos.first.$1;
-      final connectedDefault = await _attemptStealthCombo(
-        server: bestServer,
-        dns: DnsService.defaultDns,
-        alive: alive,
-        deadline: _autoAttemptDeadline,
-        heal: false,
-        note: 'Trying ${bestServer.name} with the default DNS…',
-      );
-      if (!alive()) return;
-      if (connectedDefault) {
-        await onConnected(bestServer, DnsService.defaultDns);
-        return;
       }
 
       if (!alive()) return;
       _dnsOverride = null;
       _setStatusNote(null);
-      _fail('No working server and DNS combination was found '
-          '(${combos.length + 1} combinations tried, including the '
-          'default DNS). This network may be blocking the available '
-          'methods — try again later or pick a server manually.');
+      _searchHeld = false; // the final failure must land as an error
+      _fail('No working server was found ($tried tried). '
+          'This network may be blocking the available methods — '
+          'try again later or pick a server manually.');
     } finally {
-      _stealthGateHeld = false;
+      _searchHeld = false;
       _gatedTunnelUp = false;
       if (_autoRunningSession == session) _autoRunningSession = null;
     }
@@ -1708,6 +1950,10 @@ class VpnController extends ChangeNotifier {
   /// Teeno engines ko roko. Har ek pe timeout hai — koi bhi native
   /// call kabhi hang nahi karegi, chahe engine aadhi state me ho.
   Future<void> _stopAllEngines() async {
+    // The AdShield DNS treatment is session-scoped exactly like the
+    // engines: every teardown funnels through here, so the flag
+    // clears with the session it belonged to.
+    _adShieldActive = false;
     // Every stop issued here makes its engine emit a
     // DISCONNECTED-style event. Record the stops BEFORE issuing
     // them, so those echoes are recognised as self-stops whenever
@@ -1720,12 +1966,22 @@ class VpnController extends ChangeNotifier {
     try {
       _ovpn.disconnect(); // void — fire and forget
     } catch (_) {}
-    try {
-      await _v2ray.stopV2Ray().timeout(const Duration(seconds: 6));
-    } catch (_) {}
-    try {
-      await _wg.stopVpn().timeout(const Duration(seconds: 6));
-    } catch (_) {}
+    // The two awaited stops run CONCURRENTLY: awaited one after
+    // the other, a slow stop on each could hold a teardown (and
+    // with it the next attempt's tunnel-up deadline) for up to
+    // twelve seconds.
+    await Future.wait([
+      () async {
+        try {
+          await _v2ray.stopV2Ray().timeout(const Duration(seconds: 6));
+        } catch (_) {}
+      }(),
+      () async {
+        try {
+          await _wg.stopVpn().timeout(const Duration(seconds: 6));
+        } catch (_) {}
+      }(),
+    ]);
     // native ko saans lene do
     await Future.delayed(const Duration(milliseconds: 400));
   }
@@ -1763,7 +2019,16 @@ class VpnController extends ChangeNotifier {
           return true;
         }
       }
-      // WireGuard/V2Ray ke liye ground truth: exit IP badla ya nahi.
+      if (_activeEngine == 'v2ray') {
+        // The core's own word is the ground truth (Patch 3). The
+        // exit-address comparison below cannot see this tunnel at
+        // all — the app process is excluded from it, so its direct
+        // address never changes — and relying on it (plus the
+        // status event) left this probe blind for the one engine
+        // stealth uses.
+        if (await _v2rayNativeConnected()) return true;
+      }
+      // WireGuard ke liye ground truth: exit IP badla ya nahi.
       final ip = await _safeIp();
       if (ip != null && ipBefore != null && ip != ipBefore) return true;
     } catch (_) {}
@@ -1816,6 +2081,15 @@ class VpnController extends ChangeNotifier {
     // ics-openvpn to block IPv6 inside the tunnel, so IPv6 traffic
     // cannot slip around an IPv4-only OpenVPN tunnel.
     config = hardenOpenVpnConfig(config);
+    // AdShield (v2.3.4 rework): when wanted, override the tunnel's
+    // DNS with an ad-blocking provider and keep the server from
+    // pushing a different DNS around the override.
+    if (_adShieldActive) {
+      final adDns = AdShieldService.adBlockingProvider(
+          await DnsService.loadSelected());
+      config = applyAdShieldOpenVpnDns(config, adDns.servers);
+      effectiveDns = adDns;
+    }
     // Credentials plugin ke documented username/password params se jaate hain.
     // VPNGate: vpn/vpn. VPNBook: vpnbook + weekly password (server object me).
     // Mirror: auth nahi chahiye. (VPNBook config me inline creds bhi embedded
@@ -1885,7 +2159,21 @@ class VpnController extends ChangeNotifier {
     // when one is running, otherwise the user's selected provider
     // (the plugin exposes no DNS option of its own).
     final attemptDns = _dnsOverride ?? await DnsService.loadSelected();
-    final dnsServers = attemptDns.servers;
+    // AdShield: when wanted, the tunnel's DNS is an ad-blocking
+    // provider — the Xray hosts injection below does the list-based
+    // blocking, and the provider is the upstream for everything
+    // else (and the fallback filter for WireGuard/OpenVPN).
+    final dnsServers = _adShieldActive
+        ? AdShieldService.adBlockingServers(attemptDns)
+        : attemptDns.servers;
+    // AdShield live counting: when wanted, the attempt's DNS goes
+    // through the local counting forwarder, which blocks from the
+    // same list and counts every query for real (counting_dns.dart).
+    // Started — or re-pointed at this attempt's resolvers — here;
+    // null when it could not start, in which case the plain
+    // hosts-injection treatment below applies unchanged.
+    final countingPort =
+        _adShieldActive ? await adShield?.startCounting(dnsServers) : null;
     // Hysteria2 links are not understood by the plugin's URL parser:
     // their configuration is built by hand (buildHysteria2Config)
     // and started through the same engine. Every other scheme keeps
@@ -1917,12 +2205,44 @@ class VpnController extends ChangeNotifier {
       // nothing the core originates bypasses the tunnel over the
       // phone's native IPv6; the plugin's TUN already sinkholes
       // IPv6 for app traffic. Applied uniformly, Tier 3 included.
-      config: hardenXrayConfig(
-        DnsService.isDefaultDns(attemptDns)
-            ? DnsService.defaultDnsConfig(config)
-            : DnsService.applyStealthDns(config, dnsServers),
+      // AdShield: when wanted, the bundled domain list is injected
+      // into the core's DNS as dns.hosts (blocked names resolve to
+      // 0.0.0.0), with port-53 lookups routed through the dns-out
+      // outbound. This covers the Tier-3 attempt too: the stripped
+      // config gets a fresh dns object with the attempt's servers
+      // as fallback. The injection returns the config unchanged on
+      // any error, so a connect can never break on it.
+      config: _applyAdShieldXray(
+        hardenXrayConfig(
+          DnsService.isDefaultDns(attemptDns)
+              ? DnsService.defaultDnsConfig(config)
+              : DnsService.applyStealthDns(config, dnsServers),
+        ),
+        dnsServers,
+        countingPort: countingPort,
       ),
       proxyOnly: false,
+    );
+  }
+
+  /// Apply the AdShield Xray treatment to a stealth configuration
+  /// when the attempt wants it: inject the bundled hosts into the
+  /// core's DNS (see [AdShieldService.injectXrayHosts]). With a
+  /// [countingPort] the treatment switches to counting mode instead
+  /// (the forwarder owns the list and counts every query). A no-op
+  /// returning the input when not wanted, and the injection itself
+  /// returns the input unchanged on any error — DNS (and the
+  /// connect) is never broken to keep blocking on.
+  String _applyAdShieldXray(String configJson, List<String> dnsServers,
+      {int? countingPort}) {
+    if (!_adShieldActive) return configJson;
+    final svc = adShield;
+    if (svc == null) return configJson;
+    return AdShieldService.injectXrayHosts(
+      configJson,
+      svc.hosts,
+      serversFallback: dnsServers,
+      countingPort: countingPort,
     );
   }
 
@@ -1932,14 +2252,20 @@ class VpnController extends ChangeNotifier {
     late final String conf;
     late final String endpoint;
     // The user's selected DNS provider, read fresh at connect time.
+    // AdShield: when wanted, the session runs on an ad-blocking
+    // provider instead — its resolvers filter ads at DNS inside
+    // the tunnel.
     final selectedDns = await DnsService.loadSelected();
-    final dnsServers = selectedDns.servers;
-    // The selected provider is written into the tunnel
-    // configuration below (both the WARP and the custom branch),
-    // so it is this session's DNS by construction; record it for
-    // the status display. A failed start clears the record again
-    // via _fail / _disconnect, like every session field.
-    effectiveDns = selectedDns;
+    final appliedDns = _adShieldActive
+        ? AdShieldService.adBlockingProvider(selectedDns)
+        : selectedDns;
+    final dnsServers = appliedDns.servers;
+    // The provider is written into the tunnel configuration below
+    // (both the WARP and the custom branch), so it is this
+    // session's DNS by construction; record it for the status
+    // display. A failed start clears the record again via _fail /
+    // _disconnect, like every session field.
+    effectiveDns = appliedDns;
     if (server.warp) {
       final w = await warp.ensureRegistered().timeout(
             const Duration(seconds: 25),
@@ -1947,7 +2273,11 @@ class VpnController extends ChangeNotifier {
           );
       endpoint =
           (server.endpoint?.isNotEmpty ?? false) ? server.endpoint! : w.endpoint;
-      conf = warp.buildQuickConfig(w, endpoint, dnsServers: dnsServers);
+      conf = warp.buildQuickConfig(
+        w,
+        endpoint,
+        dnsServers: dnsServers,
+      );
     } else if (server.type == 'custom') {
       if (server.peerPublicKey == null || server.endpoint == null) {
         throw Exception('Server config adhuri hai.');
@@ -1962,10 +2292,13 @@ class VpnController extends ChangeNotifier {
       // tunnel too (see kWireGuardAllowedIps). This generated
       // config carries no IPv6 address, so IPv6 dies inside the
       // tunnel instead of leaking around it.
+      // AdShield: [dnsServers] already carries the ad-blocking
+      // provider when the attempt wants it.
+      final tunnelDns = dnsServers.join(', ');
       conf = '[Interface]\n'
           'PrivateKey = ${base64Encode(privBytes)}\n'
           'Address = 10.8.0.2/32\n'
-          'DNS = ${dnsServers.join(', ')}\n'
+          'DNS = $tunnelDns\n'
           '\n'
           '[Peer]\n'
           'PublicKey = ${server.peerPublicKey}\n'

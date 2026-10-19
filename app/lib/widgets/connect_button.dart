@@ -32,6 +32,7 @@ class _ConnectButtonState extends State<ConnectButton>
 
   late final AnimationController _rotation;
   late final AnimationController _pulse;
+  late final AnimationController _sweep;
   late final AnimationController _breath;
   late final AnimationController _press;
   late final Animation<double> _pressScale;
@@ -59,6 +60,11 @@ class _ConnectButtonState extends State<ConnectButton>
     _pulse = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1500),
+    );
+    // Fast comet sweep around the ring while connecting.
+    _sweep = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
     );
     _breath = AnimationController(
       vsync: this,
@@ -91,9 +97,12 @@ class _ConnectButtonState extends State<ConnectButton>
     }
     if (s == VpnStateVisual.connecting) {
       if (!_pulse.isAnimating) _pulse.repeat();
+      if (!_sweep.isAnimating) _sweep.repeat();
     } else {
       _pulse.stop();
       _pulse.value = 0;
+      _sweep.stop();
+      _sweep.value = 0;
     }
     if (s == VpnStateVisual.connected) {
       if (!_breath.isAnimating) _breath.repeat(reverse: true);
@@ -113,6 +122,7 @@ class _ConnectButtonState extends State<ConnectButton>
   void dispose() {
     _rotation.dispose();
     _pulse.dispose();
+    _sweep.dispose();
     _breath.dispose();
     _press.dispose();
     super.dispose();
@@ -224,6 +234,7 @@ class _ConnectButtonState extends State<ConnectButton>
     final listenable = Listenable.merge([
       _rotation,
       _pulse,
+      _sweep,
       _breath,
       _pressScale,
     ]);
@@ -267,6 +278,15 @@ class _ConnectButtonState extends State<ConnectButton>
                       painter: _DashedRingPainter(color: _stateColor),
                     ),
                   ),
+                  // Fast comet sweep around the ring while connecting.
+                  if (widget.state == VpnStateVisual.connecting)
+                    Transform.rotate(
+                      angle: _sweep.value * 2 * math.pi,
+                      child: CustomPaint(
+                        size: const Size(_ringSize + 18, _ringSize + 18),
+                        painter: _SweepArcPainter(color: _stateColor),
+                      ),
+                    ),
                   // Gradient core with a state-coloured glow.
                   Container(
                     width: _coreSize,
@@ -366,5 +386,38 @@ class _DashedRingPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _DashedRingPainter oldDelegate) =>
+      oldDelegate.color != color;
+}
+
+/// Paints a comet-like sweep arc: one bright arc segment with a
+/// fading trail behind it. Rotated by the connecting-state sweep
+/// controller so it races around the button.
+class _SweepArcPainter extends CustomPainter {
+  final Color color;
+
+  const _SweepArcPainter({required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final radius = size.width / 2 - 4;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+    // Head arc plus two trailing arcs, each dimmer — the comet tail.
+    const spans = [1.6, 0.9, 0.45];
+    const alphas = [0.95, 0.45, 0.2];
+    var start = -math.pi / 2 - 1.6;
+    for (var i = 0; i < spans.length; i++) {
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = i == 0 ? 5 : 3.5
+        ..strokeCap = StrokeCap.round
+        ..color = color.withValues(alpha: alphas[i]);
+      canvas.drawArc(rect, start, spans[i], false, paint);
+      start -= spans[i] + 0.12;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _SweepArcPainter oldDelegate) =>
       oldDelegate.color != color;
 }

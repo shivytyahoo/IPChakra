@@ -34,13 +34,19 @@ class TunnelVerifier {
   static const _ioTimeout = Duration(seconds: 3);
 
   /// Run both checks against the tunnel using [resolverIp] as the
-  /// DNS server under test.
+  /// DNS server under test. The checks are independent SOCKS
+  /// connections, so they run CONCURRENTLY: run one after the
+  /// other, their combined latency routinely exceeded the caller's
+  /// overall timeout on ordinary free servers, and working
+  /// combinations were being rejected for slowness alone.
   static Future<({bool dnsOk, String? exitIp})> verify({
     required String resolverIp,
   }) async {
-    final dnsOk = await _checkDns(resolverIp);
-    final exitIp = await _fetchExitIp();
-    return (dnsOk: dnsOk, exitIp: exitIp);
+    final results = await Future.wait<Object?>([
+      _checkDns(resolverIp),
+      _fetchExitIp(),
+    ]);
+    return (dnsOk: results[0] as bool, exitIp: results[1] as String?);
   }
 
   /// Open a SOCKS5 connection through the local inbound to
@@ -116,18 +122,44 @@ class TunnelVerifier {
     return ok ?? false;
   }
 
+  /// Plain-HTTP exit-address services, raced against each other:
+  /// a single hard-coded endpoint was a single point of failure —
+  /// when it throttled or dropped the exit, every combination
+  /// failed verification no matter how healthy the tunnel was.
+  static const _exitIpHosts = ['api.ipify.org', 'checkip.amazonaws.com'];
+
   /// Check 2: fetch the exit address through the tunnel from a
   /// hostname URL — the name is resolved on the exit side, exactly
-  /// like a browser request for a site.
-  static Future<String?> _fetchExitIp() {
-    return _viaSocks<String?>('api.ipify.org', 80, (socket, reader) async {
+  /// like a browser request for a site. The first service to
+  /// answer with a valid address wins.
+  static Future<String?> _fetchExitIp() async {
+    final completer = Completer<String?>();
+    var pending = _exitIpHosts.length;
+    for (final host in _exitIpHosts) {
+      unawaited(_fetchExitIpFrom(host).then((ip) {
+        if (ip != null && !completer.isCompleted) {
+          completer.complete(ip);
+        }
+        if (--pending == 0 && !completer.isCompleted) {
+          completer.complete(null);
+        }
+      }));
+    }
+    return completer.future;
+  }
+
+  static Future<String?> _fetchExitIpFrom(String host) {
+    return _viaSocks<String?>(host, 80, (socket, reader) async {
       socket.add(utf8.encode(
-        'GET / HTTP/1.0\r\nHost: api.ipify.org\r\n\r\n',
+        'GET / HTTP/1.0\r\nHost: $host\r\nConnection: close\r\n\r\n',
       ));
-      final buffer = await reader.readToEnd(8192).timeout(
-            const Duration(seconds: 5),
-            onTimeout: () => <int>[],
-          );
+      // Whatever arrived within the window is parsed, including a
+      // complete response on a connection the peer kept open —
+      // waiting for the close discarded good answers.
+      final buffer = await reader.readToEnd(
+        8192,
+        timeout: const Duration(seconds: 5),
+      );
       final text = utf8.decode(buffer, allowMalformed: true);
       if (!text.startsWith('HTTP/1.') || !text.contains(' 200 ')) {
         return null;
@@ -194,10 +226,24 @@ class _SocketReader {
     return out;
   }
 
-  /// Read until the peer closes or [maxBytes] have arrived.
-  Future<List<int>> readToEnd(int maxBytes) async {
+  /// Read until the peer closes, [maxBytes] have arrived, or
+  /// [timeout] elapses — whichever comes first. On timeout the
+  /// bytes buffered so far are returned (a complete response on a
+  /// connection the peer kept open is still usable), never
+  /// discarded.
+  Future<List<int>> readToEnd(
+    int maxBytes, {
+    Duration timeout = const Duration(seconds: 5),
+  }) async {
+    final watch = Stopwatch()..start();
     while (!_closed && _buffer.length < maxBytes) {
-      await _waitForData();
+      final remaining = timeout - watch.elapsed;
+      if (remaining <= Duration.zero) break;
+      try {
+        await _waitForData().timeout(remaining);
+      } on TimeoutException {
+        break;
+      }
     }
     return List.of(_buffer);
   }

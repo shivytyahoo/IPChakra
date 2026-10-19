@@ -6,11 +6,11 @@
 //
 // The controller therefore records the effective DNS at the moment
 // a connection is established:
-//   * manual Stealth connect — the provider of the (server, DNS)
-//     combination that passed through-tunnel verification: the
-//     selected provider when it worked, the FALLBACK provider
-//     when it did not;
-//   * Stealth Auto — the winning combination's provider;
+//   * Stealth (manual and Auto) — since the 2026-10-11 simple-flow
+//     rework, a stealth session runs on the core's own DNS (no
+//     provider machinery at all), so the record is the built-in
+//     default provider — whatever Settings has selected is NOT
+//     consulted, and no fallback note ever appears;
 //   * Free (WireGuard) — the selected provider, which is written
 //     into the tunnel configuration at connect time and is
 //     therefore effective by construction.
@@ -31,6 +31,7 @@ import 'package:wireguard_flutter/wireguard_flutter_platform_interface.dart';
 import 'package:ipchakra/core/theme.dart';
 import 'package:ipchakra/models/vpn_server.dart';
 import 'package:ipchakra/screens/home_screen.dart';
+import 'package:ipchakra/services/adshield_service.dart';
 import 'package:ipchakra/services/dns_service.dart';
 import 'package:ipchakra/services/health_service.dart';
 import 'package:ipchakra/services/server_database.dart';
@@ -156,30 +157,31 @@ void main() {
   }
 
   test(
-    'manual Stealth connect records the SELECTED provider when it '
-    'is the one that verifies (Shiv\'s Control D scenario)',
+    'manual Stealth connect records the DEFAULT provider — the '
+    'session runs on the core\'s own DNS and the Settings '
+    'selection is not consulted (2026-10-11 simple flow)',
     () async {
       SharedPreferences.setMockInitialValues(
           prefsWithDns('controld-ads'));
       final vpn = stealthController();
-      final verifiedWith = <String>[];
-      vpn.debugComboVerifier = (dns) async {
-        verifiedWith.add(dns.id);
-        return true;
+      var verifyCalls = 0;
+      vpn.debugComboVerifier = (_) async {
+        verifyCalls++;
+        return false; // even a failing verifier cannot block it
       };
       await vpn
-          .connect(stealthServer('manual-preferred'))
+          .connect(stealthServer('manual-simple'))
           .timeout(const Duration(seconds: 60));
       expect(vpn.state, VpnState.connected);
-      expect(verifiedWith, ['controld-ads'],
-          reason: 'the selected provider is tried (and wins) first');
-      // The record carries the provider's real name and primary
-      // address from the catalogue — Control D's malware resolver.
-      expect(vpn.effectiveDns?.id, 'controld-ads');
-      expect(vpn.effectiveDns?.name, 'Control D Malware + Ads');
-      expect(vpn.effectiveDns?.primary, '76.76.2.2');
+      expect(verifyCalls, 0,
+          reason: 'no through-tunnel verification runs any more');
+      // The record is the built-in default provider — NOT the
+      // Control D provider selected in Settings.
+      expect(vpn.effectiveDns?.id, DnsService.defaultDnsId);
+      expect(vpn.effectiveDns?.name, 'Default DNS');
+      expect(vpn.effectiveDns?.primary, '1.1.1.1');
       expect(vpn.dnsFallbackNote, isNull,
-          reason: 'no fallback happened, so no fallback note');
+          reason: 'the simple flow has no fallback concept');
       // A user disconnect clears the record with the session.
       await vpn.disconnect();
       expect(vpn.state, VpnState.disconnected);
@@ -190,57 +192,21 @@ void main() {
   );
 
   test(
-    'manual Stealth connect records the FALLBACK provider — not '
-    'the selected one — when the selected DNS does not verify',
-    () async {
-      SharedPreferences.setMockInitialValues(
-          prefsWithDns('controld-ads'));
-      final vpn = stealthController();
-      // Only Google answered the connect-time measurement, so it is
-      // the one fallback a manual connect may try.
-      vpn.debugMeasureProviders = () async => {'google': 40};
-      final verifiedWith = <String>[];
-      vpn.debugComboVerifier = (dns) async {
-        verifiedWith.add(dns.id);
-        return dns.id != 'controld-ads';
-      };
-      await vpn
-          .connect(stealthServer('manual-fallback'))
-          .timeout(const Duration(seconds: 60));
-      expect(vpn.state, VpnState.connected);
-      expect(verifiedWith, ['controld-ads', 'google'],
-          reason: 'selected first, then the measured fallback');
-      expect(vpn.effectiveDns?.id, 'google',
-          reason: 'the provider that actually carried the verified '
-              'connection is recorded, not the one that failed');
-      expect(vpn.effectiveDns?.name, 'Google Public DNS');
-      expect(vpn.effectiveDns?.primary, '8.8.8.8');
-      expect(vpn.dnsFallbackNote, contains('Google Public DNS'));
-    },
-    timeout: const Timeout(Duration(seconds: 90)),
-  );
-
-  test(
-    'Stealth Auto records the winning combination\'s provider',
+    'Stealth Auto records the default provider as well',
     () async {
       SharedPreferences.setMockInitialValues(prefsWithDns(null));
       final vpn = stealthController();
-      // Quad9 answered fastest, Google second; the default
-      // selection (Cloudflare) did not answer at all.
-      vpn.debugMeasureProviders = () async => {'quad9': 30, 'google': 50};
-      var verifyCalls = 0;
-      vpn.debugComboVerifier = (_) async => ++verifyCalls >= 2;
       await vpn
           .connectStealthAuto(
               [stealthServer('auto-1'), stealthServer('auto-2')])
           .timeout(const Duration(seconds: 90));
       expect(vpn.state, VpnState.connected);
-      // Combinations run (server, Quad9) first: auto-1 fails
-      // verification, auto-2 passes — with Quad9.
-      expect(vpn.currentServer?.id, 'auto-2');
-      expect(vpn.effectiveDns?.id, 'quad9');
-      expect(vpn.effectiveDns?.name, 'Quad9');
-      expect(vpn.effectiveDns?.primary, '9.9.9.9');
+      // The first candidate whose core comes up wins (the rig
+      // brings every core up, so that is the first candidate).
+      expect(vpn.currentServer?.id, 'auto-1');
+      expect(vpn.effectiveDns?.id, DnsService.defaultDnsId);
+      expect(vpn.effectiveDns?.name, 'Default DNS');
+      expect(vpn.effectiveDns?.primary, '1.1.1.1');
     },
     timeout: const Timeout(Duration(seconds: 120)),
   );
@@ -252,12 +218,11 @@ void main() {
       SharedPreferences.setMockInitialValues(
           prefsWithDns('controld-ads'));
       final vpn = stealthController();
-      vpn.debugComboVerifier = (_) async => true;
       await vpn
           .connect(stealthServer('native-stop'))
           .timeout(const Duration(seconds: 60));
       expect(vpn.state, VpnState.connected);
-      expect(vpn.effectiveDns?.id, 'controld-ads');
+      expect(vpn.effectiveDns?.id, DnsService.defaultDnsId);
       // The user stops the VPN from outside the app.
       vpn.debugNativeDisconnected('v2ray');
       await waitUntil(
@@ -309,6 +274,7 @@ void main() {
         vpn: vpn,
         v2ray: V2RayService(),
         health: HealthService(),
+        adshield: AdShieldService(),
       )));
       for (var i = 0; i < 4; i++) {
         await tester.pump(const Duration(milliseconds: 500));

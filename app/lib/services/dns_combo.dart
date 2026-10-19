@@ -102,14 +102,16 @@ List<DnsProvider> manualEscalationAttempts({
 /// The verdict of the stability gate that follows a successful
 /// through-tunnel verification (v2.2.0): a combination may only be
 /// shown as Connected after [requiredProbes] further spaced probes
-/// through the tunnel have ALL answered, and every probe's exit
-/// address matches the address the verification itself observed
-/// ([verifiedExitIp]) — a tunnel that flaps to a different exit (or
-/// dies) seconds after verifying is exactly the "Connected, then
-/// dead by the time a site opens" failure this gate exists to
-/// reject. When [verifiedExitIp] is unknown the exit comparison is
-/// skipped and the DNS answers alone decide. Pure function —
-/// unit-tested.
+/// through the tunnel have ALL answered — each probe must return a
+/// DNS answer AND an exit address. The exit address itself may
+/// legitimately MOVE between probes: many free servers sit behind
+/// load balancers with several egress addresses, and requiring
+/// the verification's exact address rejected those healthy
+/// tunnels outright ("Working" server selected, never connects).
+/// What the gate still rejects is a tunnel that stops carrying
+/// traffic — a probe with no DNS answer or no exit fetch. When
+/// [verifiedExitIp] is unknown the exit requirement is skipped and
+/// the DNS answers alone decide. Pure function — unit-tested.
 bool stabilityGatePassed({
   required List<({bool dnsOk, String? exitIp})> probes,
   required String? verifiedExitIp,
@@ -118,12 +120,26 @@ bool stabilityGatePassed({
   if (probes.length < requiredProbes) return false;
   for (final probe in probes) {
     if (!probe.dnsOk) return false;
-    if (verifiedExitIp != null && probe.exitIp != verifiedExitIp) {
-      return false;
-    }
+    if (verifiedExitIp != null && probe.exitIp == null) return false;
   }
   return true;
 }
+
+/// Whether one watchdog liveness probe proves the live session
+/// still carries traffic. A DNS answer through the tunnel OR an
+/// exit-address fetch through the tunnel is enough: each path can
+/// fail on its own on a perfectly healthy tunnel (a resolver
+/// hiccup, a throttled IP-echo service on that exit), so only
+/// TOTAL silence — both failing together — counts as a strike
+/// against the session. This is deliberately weaker than the
+/// connect-time verification ([comboVerified] requires both):
+/// connecting must be strict, but a live session should not be
+/// torn down on partial evidence. Pure function — unit-tested.
+bool sessionCarriesTraffic({
+  required bool dnsOk,
+  required String? exitIp,
+}) =>
+    dnsOk || exitIp != null;
 
 /// Build the (server, DNS) combinations Stealth Auto tries, in
 /// order, capped at [maxCombos].
