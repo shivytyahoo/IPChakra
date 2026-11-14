@@ -50,8 +50,10 @@ class OvpnMirrorService extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       final lastFetch = prefs.getInt(_kTime) ?? 0;
+      // 6h (was 12h): the mirror repo updates, and the app
+      // re-checks this on every open/resume.
       final stale =
-          DateTime.now().millisecondsSinceEpoch - lastFetch > 12 * 3600 * 1000;
+          DateTime.now().millisecondsSinceEpoch - lastFetch > 6 * 3600 * 1000;
 
       List<Map<String, String>>? files;
       if (forceRefresh || stale) {

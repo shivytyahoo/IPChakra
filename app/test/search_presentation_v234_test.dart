@@ -111,8 +111,11 @@ void main() {
       SharedPreferences.setMockInitialValues(const {});
       final vpn = stealthController()
         ..debugAttemptDeadline = const Duration(seconds: 2);
+      vpn.debugComboVerifier = (_) async => true;
+      vpn.debugVerifiedExitIp = '203.0.113.9';
       // The first server's core never comes up (its attempt fails
-      // on the shortened deadline); the second one's does.
+      // on the shortened deadline); the second one's does — and
+      // its combination verifies through the tunnel.
       var starts = 0;
       onV2rayCall = (method) {
         if (method != 'startV2Ray') return;

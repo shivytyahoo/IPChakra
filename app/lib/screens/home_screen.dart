@@ -110,7 +110,22 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _connectFree() async {
     final prefs = await SharedPreferences.getInstance();
     final lastId = prefs.getString('last_server');
-    VpnServer? server = lastId != null ? widget.db.byId(lastId) : null;
+    // Always the fastest WORKING WARP endpoint by measured UDP
+    // latency — never list order, never last_server. The old code
+    // took db.free.first every time, so on a network where
+    // 162.159.192.1 is slow the "fastest" claim was false; the
+    // endpoints are all Cloudflare anycast, but the fastest one
+    // genuinely differs per network.
+    VpnServer? server =
+        pickFastestInGroup(widget.db.free, widget.health);
+    if (server == null && widget.db.free.isNotEmpty) {
+      // Nothing measured yet (fresh open): probe the few WARP
+      // endpoints now — six UDP probes, well under a second —
+      // instead of guessing.
+      await widget.health.checkMissing(widget.db.free, priority: true);
+      server = pickFastestInGroup(widget.db.free, widget.health);
+    }
+    server ??= lastId != null ? widget.db.byId(lastId) : null;
     server ??= widget.db.free.isNotEmpty ? widget.db.free.first : null;
     if (server == null) {
       _showSnack(
@@ -124,10 +139,11 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   /// Stealth candidates in the shared order: working servers fastest
-  /// first (measured latency), then unchecked servers in tier order,
-  /// dead servers last.
+  /// first (measured download speed, then advertised speed, then
+  /// latency — the same order the Fastest list shows), then
+  /// unchecked servers in tier order, dead servers last.
   List<VpnServer> _stealthCandidates() =>
-      sortByHealthAndLatency(widget.v2ray.servers, widget.health);
+      sortByDownloadSpeed(widget.v2ray.servers, widget.health);
 
   Future<void> _connectStealth() async {
     if (widget.v2ray.servers.isEmpty) {

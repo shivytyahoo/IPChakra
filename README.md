@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/release-v2.3.4%20AdShield%20Embedded-6C4CF1" alt="Release v2.3.4">
+  <img src="https://img.shields.io/badge/release-v1.0.0-6C4CF1" alt="Release v1.0.0">
   <img src="https://img.shields.io/badge/platform-Android%20%7C%20Android%20TV%20%7C%20Windows-3DDC84" alt="Platforms">
   <img src="https://img.shields.io/badge/built%20with-Flutter-02569B" alt="Built with Flutter">
   <img src="https://img.shields.io/badge/price-Free%20forever-success" alt="Free forever">
@@ -21,7 +21,7 @@
 
 A free VPN app for Android phones and Android TV, with a premium interface and three engines under one roof: WireGuard (Cloudflare WARP), OpenVPN, and Xray. IPChakra's speciality is its **Stealth mode** — modern censorship-resistant protocols (VLESS + Reality, Hysteria2, Trojan/TLS, Shadowsocks, VMess) with a connect system that only declares "Connected" after the tunnel has been *proven* to carry traffic with the DNS you chose.
 
-**Current release: v2.3.4 "AdShield Embedded"**
+**Current release: v1.0.0 "Fresh start"** — the version number was reset to 1.0.0 with everything since v2.3.4 folded in (see the history table below).
 
 Made with ❤️ by Shiv
 
@@ -29,7 +29,7 @@ Made with ❤️ by Shiv
 
 ## Modes
 
-- **Free** — WireGuard tunnels: Cloudflare WARP (1.1.1.1) endpoints plus any custom WireGuard server from the database. One tap, first-tap connect, with a persistent notification and a working Disconnect action.
+- **Free** — WireGuard tunnels: Cloudflare WARP (1.1.1.1) endpoints plus any custom WireGuard server from the database. Endpoints are ranked by a real measured round-trip time, so Fastest picks the lowest-latency *working* endpoint. One tap, first-tap connect, with a persistent notification and a working Disconnect action.
 - **Stealth** — Xray-powered servers (VLESS Reality, Hysteria2, Trojan/TLS, Shadowsocks, VMess) for networks that block ordinary VPNs. Connect by picking a server, or use **Stealth Auto**, which walks a ranked ladder of servers and DNS combinations until one verifies end to end.
 - **Chakra** — rotating residential IP mode. Visible in the app as a placeholder; it goes live in a later phase (it needs exit-node infrastructure that is not part of this repository yet).
 
@@ -40,9 +40,10 @@ Most VPN apps show "Connected" the moment the tunnel service starts — even if 
 1. **Verified connect.** A connection is accepted only after a real DNS answer arrives *through the tunnel* from the combination's resolver **and** a hostname fetch returns the tunnel's exit IP (different from your real one).
 2. **DNS escalation, server fixed.** On a manual connect the app tries, in order: your selected DNS → every other answering DNS provider in speed order → a last-resort default-DNS configuration — all against *your* chosen server. The server never changes behind your back; only the DNS escalates.
 3. **Stability gate.** After verification, two further probes a few seconds apart must pass with the same exit IP before the UI is allowed to say **Connected**.
-4. **Self-healing sessions.** While connected, a watchdog probes the tunnel every ~25 seconds. If the tunnel silently dies (the native layer has *not* reported a stop), the app shows **Reconnecting** — never a false "Connected" — and rebuilds the session on the same server. A stop *you* initiate (app button, notification, Android Settings or quick tile) always wins instantly and nothing ever reconnects on its own.
+4. **Self-healing sessions.** While connected, a watchdog probes the tunnel every 30 seconds. Three consecutive silent probes declare the tunnel dead, the app shows **Reconnecting** — never a false "Connected" — and rebuilds the session on the same server. A stop *you* initiate (app button, notification, Android Settings or quick tile) always wins instantly and nothing ever reconnects on its own.
 5. **Live attempt log.** Every step is narrated on the Home screen in plain English — which DNS is being tried, which failed, and the success line appears *before* the Connected state.
 6. **DNS you can audit.** Pick from 27 DNS providers in Settings (Cloudflare, Quad9, Control D, AdGuard, NextDNS, CleanBrowsing and more). The Home status card always shows the DNS **actually in use** — including when a fallback provider carried the connection instead of your pick.
+7. **Traffic-proven servers rank first.** A server that has actually carried traffic is recorded (24 h) and sorts above untested servers in both Working and Fastest, with a `working ✓` badge; a server that fails verification is marked dead immediately instead of lingering in the list as a fake "Connected".
 
 ## AdShield: ad-blocking inside the VPN
 
@@ -85,6 +86,10 @@ Honest limits, by design:
 - The injection never breaks a connect: a malformed config passes
   through unchanged, and with the switch off behaviour is byte-for-
   byte what it was before.
+- If the ad-blocking DNS itself breaks a connect, the app retries
+  once with AdShield treatment off for that session and says so on
+  the Home screen — a failed connect is never silently blamed on
+  the server.
 - Android-only: on other platforms the switch is disabled with a
   note, and behaviour is unchanged.
 
@@ -92,14 +97,15 @@ Honest limits, by design:
 
 The server lists live in this repository and update **without an app update**:
 
-- [`servers.json`](servers.json) — Free/WARP and custom servers (currently version 2, generated 2026-10-10). The app re-checks it about once an hour and shows the database version and "Last checked" time in Settings.
+- [`servers.json`](servers.json) — Free/WARP and custom servers (currently version 3). The app re-checks it about once an hour and shows the database version and "Last checked" time in Settings.
 - [`stealth.json`](stealth.json) — optional private Stealth server list, merged into the app's pool when present.
-- Stealth additionally syncs from public subscription feeds (about 450 curated servers ship with the app: Reality, Hysteria2, TLS, Shadowsocks and VMess tiers) and can import share links you paste yourself.
+- Stealth additionally syncs from public subscription feeds (a pool of 600: Reality, Hysteria2, TLS, Shadowsocks and VMess tiers) and can import share links you paste yourself. All lists auto-refresh whenever the app returns to the foreground (Stealth every 4 h, VPNGate/VPNBook every 6 h), so dead servers leave the list without an app update.
 
 ## What's new — version history
 
 | Version | Date | Highlights |
 |---|---|---|
+| **1.0.0** | 2026-11-14 | **Fresh start.** Version reset to 1.0.0 with everything since v2.3.4 folded in. **Verified connect, honest lists:** a Stealth server that cannot carry real traffic never shows "Connected" — it is skipped and marked dead, while traffic-proven servers rank first with a `working ✓` badge. **Your DNS first:** every connect tries the DNS you picked in Settings before escalating. **AdShield fallback:** if the ad-blocking DNS itself breaks a connect, the app retries once with AdShield treatment off and says so. **No more stuck "Connecting…":** a late CONNECTING event can no longer knock a live session back. **Server refresh:** three new Stealth feeds (0xRadikal top100/light, MahanKenway mix_sub), Pawdroid feed removed, WARP 7th endpoint (188.114.99.1), servers.json v3, cache schema 6, auto-refresh on every foreground return, real 5 MB download speed tests, R8 release shrinking, and anti-detect surrogates for the embedded AdShield (fail-safe stub DNS server). |
 | **2.3.4** | 2026-10-11 | **AdShield Embedded.** The AdShield ad-blocker now lives inside the app: one tap on the animated Home-screen switch blocks ads and trackers at the VPN session's DNS — no second app, no second VPN profile. V2Ray sessions get the full ~254,000-domain list (StevenBlack + HaGeZi Multi PRO + uBlock + curated ad-network lists, streaming EXTREME pack on) injected into the core's DNS; WireGuard/OpenVPN sessions switch to an ad-blocking DNS provider. The card shows the list size honestly — there is no fake per-query counter — and an animated connect button sweep while connecting. |
 | **2.3.3** | 2026-10-11 | **OpenVPN Mega-Database.** The OpenVPN list grows from ~290 to ≈5,128 entries — the VPNGate rolling pool (hourly bot pool of ~4,900 servers, fetched via a cheap change-index and parsed off the UI thread), a handshake-verified liveness overlay, and VPNBook in four protocol variants. Stealth country grouping restored (full ISO country detection; flags, codes, English and Chinese names). Switching modes no longer disconnects a live VPN — the engine hand-over happens only when you tap Connect in another mode. The WireGuard notification is now an ongoing foreground-service notification that cannot be swiped away while connected. |
 | 2.3.2 | 2026-10-11 | **Layout fix.** Server names render on one line again (a unified hand-built server tile replaces the ListTile rows whose trailing buttons starved the name of width), with rendered-geometry regression tests. |

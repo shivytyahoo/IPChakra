@@ -194,6 +194,11 @@ void main() {
       final vpn = VpnController(WarpService(), wgEngine: wg)
         ..debugForceAndroid = true
         ..debugAttemptDeadline = const Duration(seconds: 2);
+      // The winning combination is verified through the tunnel
+      // (stubbed: it carries) — Auto no longer trusts engine-up
+      // alone.
+      vpn.debugComboVerifier = (_) async => true;
+      vpn.debugVerifiedExitIp = '203.0.113.9';
       final serverA = stealthServer('seq-a');
       final serverB = stealthServer('seq-b');
       var starts = 0;
@@ -274,6 +279,11 @@ void main() {
       final vpn = VpnController(WarpService(), wgEngine: wg)
         ..debugForceAndroid = true
         ..debugAttemptDeadline = const Duration(seconds: 2);
+      // The winning combination is verified through the tunnel
+      // (stubbed: it carries) — Auto no longer trusts engine-up
+      // alone.
+      vpn.debugComboVerifier = (_) async => true;
+      vpn.debugVerifiedExitIp = '203.0.113.9';
       final servers = [
         stealthServer('run-1'),
         stealthServer('run-2'),

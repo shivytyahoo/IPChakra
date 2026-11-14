@@ -56,8 +56,11 @@ class VpnGateService extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       final lastFetch = prefs.getInt(_kTime) ?? 0;
+      // 6h (was 12h): VPNGate relays come and go, and the app
+      // re-checks this on every open/resume — a stale list is how
+      // dead servers pile up.
       final stale =
-          DateTime.now().millisecondsSinceEpoch - lastFetch > 12 * 3600 * 1000;
+          DateTime.now().millisecondsSinceEpoch - lastFetch > 6 * 3600 * 1000;
 
       String? csv;
       if (forceRefresh || stale) {
@@ -114,6 +117,13 @@ class VpnGateService extends ChangeNotifier {
         final config = utf8.decode(base64Decode(b64));
         if (!config.contains('<ca>')) continue;
         final mbps = (speed / 1000000).toStringAsFixed(0);
+        // The Speed column is the server's advertised throughput in
+        // bits per second (measured by the VPNGate network, not by
+        // this device). Keep it as a number, not just note text, so
+        // the download-speed sort can rank on it: a server that
+        // answers a TCP probe in 20 ms but pushes 1 Mbps must not
+        // outrank one that answers in 80 ms and pushes 200 Mbps.
+        final advertisedMbps = speed > 0 ? speed / 1000000 : null;
         // The CSV's IP is the endpoint identity: the config's own
         // remote line may use a hostname, but the pool index and
         // the liveness registry both key on the IP, so the probe
@@ -130,6 +140,7 @@ class VpnGateService extends ChangeNotifier {
           note: '$ping ms • $mbps Mbps • $sessions users',
           ovpnConfig: config,
           pingMs: ping,
+          speedMbps: advertisedMbps,
           source: 'vpngate',
           probeHost: ip,
           probePort: remote?.$2,

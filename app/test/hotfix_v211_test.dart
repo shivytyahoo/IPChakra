@@ -157,11 +157,16 @@ void main() {
       );
     });
 
-    test('the current schema is the attributed multi-feed one (4)', () {
+    test('the current schema is the Pawdroid-free one (6)', () {
       // Was 3 in the v2.1.1–v2.2.0 releases (the Hysteria2-capable
       // schema); v2.3.0 bumped it to 4 for per-feed attribution and
-      // the five new feeds, so v3 caches are discarded once.
-      expect(V2RayService.cacheSchemaVersion, 4);
+      // the five new feeds, so v3 caches are discarded once; the
+      // 2026-11-07 server refresh bumped it to 5 when the dead
+      // Epodonios feed was removed, so v4 caches are discarded once;
+      // the 2026-11-14 refresh bumped it to 6 when Pawdroid was
+      // removed and top100/MahanKenway/Radikal-light joined, so v5
+      // caches are discarded once.
+      expect(V2RayService.cacheSchemaVersion, 6);
     });
   });
 

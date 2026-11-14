@@ -203,6 +203,12 @@ void main() {
 
     await tester.tap(find.textContaining('Stealth').first);
     await _runSeconds(tester, 1);
+    // The chip row scrolls horizontally: with the 'Fastest' chip
+    // added (2026-11-07), 'Reality' is the 4th chip and sits past
+    // the 360 dp fold, so scroll it into view before tapping —
+    // otherwise the tap lands on whatever is at that offset and the
+    // filter never changes.
+    await tester.ensureVisible(find.widgetWithText(ChoiceChip, 'Reality'));
     await tester.tap(find.widgetWithText(ChoiceChip, 'Reality'));
     await _runSeconds(tester, 2);
 

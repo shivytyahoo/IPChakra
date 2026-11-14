@@ -16,6 +16,18 @@ import 'stealth_link.dart';
 /// ordering. The UI updates progressively — badges flip as each batch
 /// completes.
 ///
+/// A TCP answer is WEAK evidence for a stealth server: the port can
+/// accept TCP while the proxy credentials are wrong, the subscription
+/// is dead, or the outbound carries no traffic — exactly the
+/// "connected but no internet" complaint. So there is a second,
+/// stronger tier: [recordVerified] — a server that carried REAL
+/// traffic through its live tunnel (a connect that passed
+/// end-to-end verification, or a real download through the tunnel).
+/// Traffic-verified servers rank above merely TCP-reachable ones in
+/// both sorts, and their badge carries a ✓. A verified verdict lasts
+/// [verifiedFor] (free nodes churn, so "always working" is a
+/// promise no one can keep — verified means proven recently).
+///
 /// Verdicts are PERSISTED (see [loadPersisted]) and stay fresh for
 /// [freshFor]: reopening the app shows the last-known badges and
 /// ordering instantly and only re-probes what is missing or stale,
@@ -25,9 +37,17 @@ import 'stealth_link.dart';
 class HealthService extends ChangeNotifier {
   static const _kMirrorTargets = 'health_mirror_targets';
   static const _kPersisted = 'health_results_v1';
+  static const _kVerified = 'health_verified_v1';
 
   /// Probe timeout for a single TCP connect.
   static const probeTimeout = Duration(milliseconds: 1500);
+
+  /// How long a traffic-verified verdict counts as fresh. Longer
+  /// than [freshFor]: a server that carried real traffic an hour
+  /// ago is still a far better bet than one whose port merely
+  /// answered TCP, but free nodes die fast enough that a day-old
+  /// proof is no proof at all.
+  static const verifiedFor = Duration(hours: 24);
 
   /// Servers probed concurrently in one batch.
   static const batchSize = 60;
@@ -36,6 +56,55 @@ class HealthService extends ChangeNotifier {
   /// checks skip fresh servers and only re-probe missing or stale
   /// ones.
   static const freshFor = Duration(minutes: 30);
+
+  /// serverId -> epoch milliseconds of the last TRAFFIC proof for
+  /// that server (a verified connect or a real download through
+  /// its tunnel). Separate from [_checkedAtMs]: a TCP probe must
+  /// never refresh a traffic verdict, and a traffic verdict must
+  /// never be confused with a port answer.
+  final Map<String, int> _verifiedAtMs = {};
+
+  /// Whether [id] carried real traffic through its live tunnel
+  /// recently (inside [verifiedFor]). A stale proof is no proof:
+  /// it reads as unverified, so the next sweep can re-earn it.
+  bool isVerified(String id) {
+    final ts = _verifiedAtMs[id];
+    if (ts == null) return false;
+    if (DateTime.now().millisecondsSinceEpoch - ts >
+        verifiedFor.inMilliseconds) {
+      return false;
+    }
+    return status[id] == true;
+  }
+
+  /// Record that [id] carried real traffic through its live
+  /// tunnel right now: working, verified, freshly timestamped.
+  /// Called by the connect path after end-to-end verification
+  /// passes, and by [recordSpeed] (a real download through the
+  /// tunnel is itself traffic proof).
+  void recordVerified(String id) {
+    status[id] = true;
+    _verifiedAtMs[id] = DateTime.now().millisecondsSinceEpoch;
+    _checkedAtMs[id] = DateTime.now().millisecondsSinceEpoch;
+    _schedulePersist();
+    notifyListeners();
+  }
+
+  /// Record that [id] proved itself dead — its tunnel came up but
+  /// carried no traffic, or its engine never came up at all. The
+  /// verdict is immediate (no waiting for the next sweep) so the
+  /// server drops out of Working/Fastest at once, its latency and
+  /// speed are cleared so no stale number can rank it, and any
+  /// earlier traffic proof is revoked.
+  void recordDead(String id) {
+    status[id] = false;
+    latencyMs.remove(id);
+    speedMbps.remove(id);
+    _verifiedAtMs.remove(id);
+    _checkedAtMs[id] = DateTime.now().millisecondsSinceEpoch;
+    _schedulePersist();
+    notifyListeners();
+  }
 
   /// serverId -> epoch milliseconds of its last completed probe.
   final Map<String, int> _checkedAtMs = {};
@@ -49,6 +118,19 @@ class HealthService extends ChangeNotifier {
   /// Only present for servers whose probe succeeded over TCP; WARP
   /// (never probed) and UDP-only servers carry no latency.
   final Map<String, int> latencyMs = {};
+
+  /// serverId -> measured download speed in Mbps, from a real file
+  /// downloaded through the live tunnel (see ServerSpeedTest).
+  /// Only present for servers the speed test actually measured; a
+  /// server with no entry was never speed-tested, not slow. It
+  /// outranks the feed-advertised speed ([VpnServer.speedMbps]) in
+  /// the download-speed sort: a real measurement on the user's
+  /// network beats a claim from the feed's side.
+  final Map<String, double> speedMbps = {};
+
+  /// Measured download speed for [id] in Mbps, or null when the
+  /// server was never speed-tested.
+  double? speedOf(String id) => speedMbps[id];
 
   /// Abhi check ho rahe server ids.
   final Set<String> checkingIds = {};
@@ -101,17 +183,45 @@ class HealthService extends ChangeNotifier {
       if (doc is! Map) return;
       for (final e in doc.entries) {
         final v = e.value;
-        if (v is List && v.length == 3) {
+        // Length 3 is the pre-speed-test format (no measured speed);
+        // length 4 appends the measured speed in milli-Mbps.
+        if (v is List && (v.length == 3 || v.length == 4)) {
           final id = e.key.toString();
           status[id] = (v[0] as num) != 0;
           final lat = (v[1] as num).toInt();
           if (lat >= 0) latencyMs[id] = lat;
-          _checkedAtMs[id] = (v[2] as num).toInt();
+          if (v.length == 4) {
+            final sp = (v[2] as num).toInt();
+            if (sp >= 0) speedMbps[id] = sp / 1000;
+          }
+          _checkedAtMs[id] = v.length == 4
+              ? (v[3] as num).toInt()
+              : (v[2] as num).toInt();
         }
       }
       notifyListeners();
     } catch (_) {
       // A malformed store just means a cold start.
+    }
+    // The traffic-proof store is separate: a server verified by a
+    // real tunnel session keeps its proof across launches (24 h),
+    // independently of the TCP verdicts above.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_kVerified);
+      if (raw != null) {
+        final doc = jsonDecode(raw);
+        if (doc is Map) {
+          for (final e in doc.entries) {
+            final ts = (e.value as num?)?.toInt();
+            if (ts != null && ts > 0) {
+              _verifiedAtMs[e.key.toString()] = ts;
+            }
+          }
+        }
+      }
+    } catch (_) {
+      // A malformed store just means no traffic proofs yet.
     }
   }
 
@@ -132,11 +242,15 @@ class HealthService extends ChangeNotifier {
           e.key: [
             e.value ? 1 : 0,
             latencyMs[e.key] ?? -1,
+            speedMbps[e.key] == null
+                ? -1
+                : (speedMbps[e.key]! * 1000).round(),
             _checkedAtMs[e.key] ?? 0,
           ],
       };
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_kPersisted, jsonEncode(doc));
+      await prefs.setString(_kVerified, jsonEncode(_verifiedAtMs));
     } catch (_) {
       // Persistence is an optimisation; losing it costs a re-probe,
       // never correctness.
@@ -234,9 +348,18 @@ class HealthService extends ChangeNotifier {
       // WARP is Cloudflare's anycast network, not a single server, so
       // the notion of "dead" does not apply — and WireGuard runs over
       // UDP, so a TCP probe would report a working tunnel as dead.
-      // Always working, never probed, no latency.
+      // Always working — but the endpoint still gets a real RTT
+      // measurement, so the Free path can actually pick the
+      // fastest entry point instead of always the first: the
+      // WireGuard port refuses TCP instantly, and that refusal's
+      // round-trip time IS the latency (a blackholed endpoint
+      // simply measures nothing and stays unranked, never dead).
       if (s.source == 'warp' || s.warp) {
-        _recordResult(s.id, true);
+        final target = _parseEndpoint(s.endpoint);
+        final rtt = target == null
+            ? null
+            : await _timedTcpRtt(target.$1, target.$2);
+        _recordResult(s.id, true, latency: rtt);
         return;
       }
       // Hysteria2 runs over UDP/QUIC: its port will usually refuse a
@@ -288,9 +411,25 @@ class HealthService extends ChangeNotifier {
       latencyMs[id] = latency;
     } else if (!working) {
       latencyMs.remove(id);
+      speedMbps.remove(id);
     }
     _checkedAtMs[id] = DateTime.now().millisecondsSinceEpoch;
     _schedulePersist();
+  }
+
+  /// Record a measured download speed for [id] in Mbps. A speed
+  /// measurement proves the server works — the test downloaded a
+  /// real file through its live tunnel — so it also records a
+  /// working verdict with a fresh timestamp, and a TRAFFIC proof
+  /// (see [recordVerified]), and persists like any other verdict.
+  void recordSpeed(String id, double mbps) {
+    if (mbps <= 0) return;
+    status[id] = true;
+    speedMbps[id] = mbps;
+    _verifiedAtMs[id] = DateTime.now().millisecondsSinceEpoch;
+    _checkedAtMs[id] = DateTime.now().millisecondsSinceEpoch;
+    _schedulePersist();
+    notifyListeners();
   }
 
   /// Server ka (host, port, isUdp) nikalo — source ke hisaab se.
@@ -465,9 +604,43 @@ class HealthService extends ChangeNotifier {
     }
   }
 
+  /// Round-trip time to a UDP-only endpoint (WARP): a TCP connect
+  /// to the WireGuard port is refused at once by a live endpoint,
+  /// and that refusal's timing is the RTT. Returns null when the
+  /// host never answers inside [probeTimeout] (blackholed) — no
+  /// verdict either way, never "dead". Test-only seam below.
+  Future<int?> _timedTcpRtt(String host, int port) async {
+    final watch = Stopwatch()..start();
+    try {
+      final socket = await Socket.connect(host, port, timeout: probeTimeout);
+      watch.stop();
+      socket.destroy();
+      return watch.elapsedMilliseconds;
+    } on TimeoutException {
+      return null;
+    } catch (_) {
+      watch.stop();
+      final ms = watch.elapsedMilliseconds;
+      return ms < probeTimeout.inMilliseconds ? ms : null;
+    }
+  }
+
+  /// "host:port" (or "[v6]:port") for a WireGuard endpoint string.
+  (String, int)? _parseEndpoint(String? endpoint) {
+    if (endpoint == null || endpoint.isEmpty) return null;
+    final m = RegExp(r'^\[([^\]]+)\]:(\d+)$').firstMatch(endpoint) ??
+        RegExp(r'^([^:]+):(\d+)$').firstMatch(endpoint);
+    if (m == null) return null;
+    final port = int.tryParse(m.group(2)!);
+    if (port == null) return null;
+    return (m.group(1)!, port);
+  }
+
   void reset() {
     status.clear();
     latencyMs.clear();
+    speedMbps.clear();
+    _verifiedAtMs.clear();
     checkingIds.clear();
     _checkedAtMs.clear();
     checking = false;
@@ -487,6 +660,25 @@ class HealthService extends ChangeNotifier {
   /// Test-only: host/port for any stealth share link scheme.
   @visibleForTesting
   (String, int)? debugParseLink(String? l) => _parseLinkTarget(l);
+
+  /// Test-only: round-trip time to a host:port (refusal counts).
+  @visibleForTesting
+  Future<int?> debugTimedTcpRtt(String host, int port) =>
+      _timedTcpRtt(host, port);
+
+  /// Test-only: backdate (or clear) a traffic proof.
+  @visibleForTesting
+  void debugSetVerifiedAt(String id, int? epochMs) {
+    if (epochMs == null) {
+      _verifiedAtMs.remove(id);
+    } else {
+      _verifiedAtMs[id] = epochMs;
+    }
+  }
+
+  /// Test-only: "host:port" for a WireGuard endpoint string.
+  @visibleForTesting
+  (String, int)? debugParseEndpoint(String? e) => _parseEndpoint(e);
 }
 
 /// The one shared server ordering, used by the Home screen, the
@@ -510,10 +702,15 @@ List<VpnServer> sortByHealthAndLatency(
   int rankOf(VpnServer s) {
     final working = health.isWorking(s.id);
     if (working == true) {
-      return (health.latencyOf(s.id) != null || s.pingMs != null) ? 0 : 1;
+      // Traffic-proven first: a server that carried real data
+      // through its live tunnel beats one whose port merely
+      // answered TCP — the port answer is what "connected but no
+      // internet" used to hide behind.
+      if (health.isVerified(s.id)) return 0;
+      return (health.latencyOf(s.id) != null || s.pingMs != null) ? 1 : 2;
     }
-    if (working == null) return 2;
-    return 3;
+    if (working == null) return 3;
+    return 4;
   }
 
   int? speedOf(VpnServer s) => health.latencyOf(s.id) ?? s.pingMs;
@@ -526,7 +723,7 @@ List<VpnServer> sortByHealthAndLatency(
   // server the app found dead stays in the dead rank, verified or
   // not.
   int subRankOf(VpnServer s) =>
-      (rankOf(s) == 2 && s.externalVerified) ? 0 : 1;
+      (rankOf(s) == 3 && s.externalVerified) ? 0 : 1;
 
   final decorated = <(int, int, int?, int, VpnServer)>[
     for (var i = 0; i < servers.length; i++)
@@ -552,6 +749,82 @@ List<VpnServer> sortByHealthAndLatency(
     return a.$4.compareTo(b.$4);
   });
   return [for (final e in decorated) e.$5];
+}
+
+/// The download-speed ordering, used by the lists' "Fastest" filter:
+///
+/// 1. Traffic-VERIFIED working servers with a MEASURED download
+///    speed — highest Mbps first. A server that carried real data
+///    through its live tunnel on this device, at a measured speed:
+///    the only rank that cannot be faked by a port that merely
+///    answers TCP.
+/// 2. Traffic-verified working servers with no measured speed —
+///    lowest probe latency first.
+/// 3. Working servers with a MEASURED download speed — highest Mbps
+///    first (a real file downloaded through the live tunnel on this
+///    device and network — see ServerSpeedTest).
+/// 4. Working servers with an ADVERTISED speed from their feed
+///    (VPNGate's Speed column) — highest first. A claim, so it
+///    ranks below any real measurement.
+/// 5. Working servers with no speed information — lowest probe
+///    latency first (the same fallback the latency sort uses).
+/// 6. Unchecked servers, in input order.
+/// 7. Dead servers last.
+///
+/// The sort is stable: servers that compare equal keep input order.
+/// Pure — unit-tested.
+List<VpnServer> sortByDownloadSpeed(
+  List<VpnServer> servers,
+  HealthService health,
+) {
+  int rankOf(VpnServer s) {
+    final working = health.isWorking(s.id);
+    if (working == true) {
+      if (health.isVerified(s.id)) {
+        return health.speedOf(s.id) != null ? 0 : 1;
+      }
+      if (health.speedOf(s.id) != null) return 2;
+      if (s.speedMbps != null) return 3;
+      return 4;
+    }
+    if (working == null) return 5;
+    return 6;
+  }
+
+  int? latencyOf(VpnServer s) => health.latencyOf(s.id) ?? s.pingMs;
+
+  final decorated = <(VpnServer, int)>[
+    for (var i = 0; i < servers.length; i++) (servers[i], i),
+  ];
+  decorated.sort((a, b) {
+    final ra = rankOf(a.$1);
+    final rb = rankOf(b.$1);
+    if (ra != rb) return ra.compareTo(rb);
+    if (ra == 0 || ra == 2) {
+      // Measured speed, highest first.
+      final bySpeed = health
+          .speedOf(b.$1.id)!
+          .compareTo(health.speedOf(a.$1.id)!);
+      if (bySpeed != 0) return bySpeed;
+    } else if (ra == 3) {
+      final bySpeed = b.$1.speedMbps!.compareTo(a.$1.speedMbps!);
+      if (bySpeed != 0) return bySpeed;
+    } else if (ra == 1 || ra == 4) {
+      // No speed: lowest latency first.
+      final la = latencyOf(a.$1);
+      final lb = latencyOf(b.$1);
+      if (la != null && lb != null) {
+        final byLatency = la.compareTo(lb);
+        if (byLatency != 0) return byLatency;
+      } else if (la != null) {
+        return -1;
+      } else if (lb != null) {
+        return 1;
+      }
+    }
+    return a.$2.compareTo(b.$2);
+  });
+  return [for (final e in decorated) e.$1];
 }
 
 /// The fastest server in [servers] according to [health]: the

@@ -56,10 +56,19 @@ bool shouldHonorConnectedEvent(VpnState state, bool hasActiveServer) =>
     (state == VpnState.connecting || state == VpnState.connected);
 
 /// Whether a native transitional ("connecting") event may move the UI
-/// to the connecting state. Only while an attempt or session is live;
-/// a stale event arriving after disconnect must not resurrect it.
+/// to the connecting state. ONLY while an attempt is already in
+/// flight ([VpnState.connecting]) — a transitional event arriving
+/// after the session is already Connected is stale by definition:
+/// the V2Ray plugin re-emits CONNECTING/STARTING transitions (most
+/// visibly on AdShield sessions, whose engine start awaits the
+/// counting forwarder and carries extra routing), and honouring one
+/// knocked a live session's UI back to "Connecting..." forever
+/// even though the log already said "Connected with ..." (device
+/// screenshot, 2026-11-14). A real drop arrives as DISCONNECTED
+/// and the app's own heal owns reconnects, so no live session ever
+/// legitimately returns to `connecting` through an engine event.
 bool shouldHonorConnectingEvent(VpnState state) =>
-    state == VpnState.connecting || state == VpnState.connected;
+    state == VpnState.connecting;
 
 /// Whether tapping a server row should DISCONNECT instead of connect.
 ///
@@ -312,6 +321,16 @@ class VpnController extends ChangeNotifier {
   /// the session fields.
   bool _adShieldActive = false;
 
+  /// One-shot escape hatch for the AdShield fallback: when a
+  /// connect ladder has exhausted every DNS tier with AdShield on
+  /// and nothing carried traffic, the ladder retries with the
+  /// treatment switched off — the session then runs on plain DNS
+  /// instead of leaving the user with no connection at all. Set
+  /// by the ladder before the fallback attempts, cleared by it
+  /// afterwards (see [_connectStealthSimple]); never left on
+  /// across user intents.
+  bool _adShieldFallback = false;
+
   /// Whether the attempt log already carries the AdShield line for
   /// the current session — so a stealth combination search
   /// narrates it once, not once per combination. Reset with the
@@ -336,9 +355,12 @@ class VpnController extends ChangeNotifier {
   /// paths below (the Xray hosts injection on V2Ray, an
   /// ad-blocking DNS provider on WireGuard/OpenVPN) — no socket is
   /// started, so there is no failure mode: the flag simply records
-  /// whether the session wants it.
+  /// whether the session wants it. When [_adShieldFallback] is set
+  /// the treatment stays off for this attempt even though the user
+  /// left the switch on: the fallback ladder already proved the
+  /// treatment is what broke the connect, and the log says so.
   void _decideAdShield() {
-    _adShieldActive = _adShieldWanted;
+    _adShieldActive = _adShieldFallback ? false : _adShieldWanted;
     if (_adShieldActive && !_adShieldNarrated) {
       _adShieldNarrated = true;
       _logLine('AdShield is on for this session — ads and trackers '
@@ -741,15 +763,35 @@ class VpnController extends ChangeNotifier {
   /// inject a fake WireGuard engine because the plugin's desktop
   /// implementation shells out to `sudo wg`, which no test host
   /// provides. Production always uses the plugin's real engine.
+  ///
+  /// [onTrafficVerified] fires when a stealth tunnel has proven
+  /// it carries real traffic (end-to-end verification passed) —
+  /// the app records the server traffic-verified so the lists rank
+  /// it first. [onServerDead] fires when a server proved itself
+  /// dead (tunnel never came up, or carried no traffic even with
+  /// the default DNS treatment) — the app drops it from
+  /// Working/Fastest at once. Both are best-effort notifications,
+  /// never connect gates.
   VpnController(
     this.warp, {
     WireGuardFlutterInterface? wgEngine,
     this.userLists,
     this.adShield,
+    this.onTrafficVerified,
+    this.onServerDead,
   }) : _wg = wgEngine ?? WireGuardFlutter.instance {
     _ovpn = OpenVPN(onVpnStageChanged: _onOvpnStage);
     _v2ray = V2ray(onStatusChanged: _onV2rayStatus);
   }
+
+  /// Best-effort notification: [serverId] carried real traffic
+  /// through its live tunnel — the app records the server
+  /// traffic-verified so the lists rank it first.
+  final void Function(String serverId)? onTrafficVerified;
+
+  /// Best-effort notification: [serverId] proved itself dead —
+  /// the app drops it from Working/Fastest at once.
+  final void Function(String serverId)? onServerDead;
 
   Future<void> _init() async {
     if (_inited) return;
@@ -1009,10 +1051,12 @@ class VpnController extends ChangeNotifier {
 
   // ── connect / disconnect ────────────────────────────────────────
 
-  /// Connect to [server]. Stealth (V2Ray) servers take the simple
-  /// single-attempt flow — the server with the core's own DNS, no
-  /// combination machinery (see [_connectStealthSimple]). Every
-  /// other engine connects directly, exactly as before.
+  /// Connect to [server]. Stealth (V2Ray) servers take the verified
+  /// ladder (see [_connectStealthSimple]): the user's selected DNS
+  /// first, escalating until a combination passes end-to-end
+  /// verification — a tunnel that carries no traffic is never
+  /// shown as connected. Every other engine connects directly,
+  /// exactly as before.
   Future<void> connect(VpnServer server) async {
     // A fresh user connect is a new intent: any stealth search loop
     // still running from an earlier tap aborts at its next check.
@@ -1108,7 +1152,17 @@ class VpnController extends ChangeNotifier {
   /// through the core's SOCKS inbound: a real DNS answer from the
   /// combination's resolver AND a real hostname fetch returning the
   /// tunnel's exit address. See [comboVerified] for the gate.
-  Future<bool> _verifyCombination(DnsProvider dns) async {
+  ///
+  /// [requireDns] is false only for the Tier-3 default-DNS
+  /// attempt: there the core's own DNS resolved the fetch's
+  /// hostname already, so the fetch alone proves name resolution
+  /// works — demanding a second answer from the default resolver
+  /// would reject healthy tunnels whose egress blocks third-party
+  /// port-53. Every other tier requires both.
+  Future<bool> _verifyCombination(
+    DnsProvider dns, {
+    bool requireDns = true,
+  }) async {
     final verifierOverride = debugComboVerifier;
     if (verifierOverride != null) {
       final ok = await verifierOverride(dns);
@@ -1129,7 +1183,7 @@ class VpnController extends ChangeNotifier {
       final result = await TunnelVerifier.verify(resolverIp: dns.primary)
           .timeout(const Duration(seconds: 10));
       final ok = comboVerified(
-        dnsOk: result.dnsOk,
+        dnsOk: requireDns ? result.dnsOk : true,
         fetchOk: result.exitIp != null,
         tunnelIp: result.exitIp,
         baselineIp: _lastBaselineIp,
@@ -1180,18 +1234,22 @@ class VpnController extends ChangeNotifier {
     required DnsProvider dns,
     required String? verifiedExitIp,
     required bool Function() alive,
+    bool requireDns = true,
   }) async {
     final probes = <({bool dnsOk, String? exitIp})>[];
     for (var i = 0; i < stabilityProbeCount; i++) {
       await Future.delayed(debugStabilitySpacing ?? stabilityProbeSpacing);
       if (!alive()) return false;
       probes.add(await _stabilityProbe(dns, verifiedExitIp));
-      if (!probes.last.dnsOk) break; // the gate fails on length alone
+      if (!probes.last.dnsOk && requireDns) {
+        break; // the gate fails on length alone
+      }
     }
     return stabilityGatePassed(
       probes: probes,
       verifiedExitIp: verifiedExitIp,
       requiredProbes: stabilityProbeCount,
+      requireDns: requireDns,
     );
   }
 
@@ -1246,6 +1304,12 @@ class VpnController extends ChangeNotifier {
     _dnsOverride = dns;
     _gatedTunnelUp = false;
     _searchAttemptFailed = false;
+    // Tier 3 is the default-DNS treatment: the configuration
+    // carries no custom DNS at all, so the verification's DNS
+    // answer from the default resolver is advisory — the fetch
+    // already proved the core's own DNS resolves hostnames. The
+    // same leniency applies to the stability gate below.
+    final isTier3 = DnsService.isDefaultDns(dns);
     if (note != null) _setStatusNote(note);
     _logLine('Trying ${server.name} with $label…');
 
@@ -1305,13 +1369,25 @@ class VpnController extends ChangeNotifier {
           ? 'The tunnel did not come up with $label.'
           : 'The tunnel did not come up with $label '
               '(engine state: ${nativeState.replaceFirst('V2RAY_', '').toLowerCase()}).');
+      // The tunnel never came up: the server proved itself dead
+      // on this network — unless the AdShield treatment was on,
+      // whose DNS plumbing can break a bootstrap that the plain
+      // treatment would have carried (the fallback ladder gets
+      // its own shot at the same server).
+      if (!_adShieldActive) onServerDead?.call(server.id);
       await _disconnect(userIntent: false);
       return false;
     }
-    if (!await _verifyCombination(dns)) {
+    if (!await _verifyCombination(dns, requireDns: !isTier3)) {
       if (!alive()) return false;
       _logLine(
           '${_dnsAttemptLabelSentence(dns)} did not answer through the tunnel.');
+      // A Tier-3 failure is the server itself: with the core's
+      // own DNS it still carried no traffic, so the server is
+      // dead, not the DNS choice — drop it from Working/Fastest
+      // at once. A Tier-1/2 failure is the DNS choice, and the
+      // escalation ladder is exactly what routes around it.
+      if (isTier3 && !_adShieldActive) onServerDead?.call(server.id);
       await _disconnect(userIntent: false);
       return false;
     }
@@ -1327,6 +1403,7 @@ class VpnController extends ChangeNotifier {
       dns: dns,
       verifiedExitIp: verifiedExitIp,
       alive: alive,
+      requireDns: !isTier3,
     );
     if (!alive()) return false;
     if (!stable) {
@@ -1334,6 +1411,10 @@ class VpnController extends ChangeNotifier {
       await _disconnect(userIntent: false);
       return false;
     }
+
+    // Traffic-proven: this server carried real data through its
+    // live tunnel, so the lists rank it first from now on.
+    onTrafficVerified?.call(server.id);
 
     // Narrate first, then connect: the log's final line precedes
     // the state flip it announces.
@@ -1346,84 +1427,27 @@ class VpnController extends ChangeNotifier {
 
   /// Manual stealth connect: the server is the user's pick and
   /// never changes; the DNS escalates until a combination holds —
-  /// Tier 1 the selected provider, Tier 2 the other answering
-  /// providers in measured speed order, Tier 3 the built-in
-  /// default DNS treatment (see [manualEscalationAttempts]).
-  /// "Connected" is declared only for a combination that passed
-  /// verification and the stability gate.
-  /// One stealth attempt against ONE server, with no DNS
-  /// dimension at all (2026-10-11, Shiv's order after the
-  /// combination machinery repeatedly failed on his device): the
-  /// configuration carries no custom DNS treatment — the core's
-  /// own default DNS handling applies, exactly as in a standard
-  /// client — and the attempt succeeds the moment the engine
-  /// reports its tunnel up, through the status event or the
-  /// native ground-truth poll. Returns true when the session is
-  /// now Connected with [server]. Every failure is logged in
-  /// plain English (with the engine's own state, when known) and
-  /// the attempt is torn down cleanly.
-  Future<bool> _attemptStealthServer({
-    required VpnServer server,
-    required bool Function() alive,
-    required Duration deadline,
-    String? note,
-  }) async {
-    _dnsOverride = DnsService.defaultDns;
-    _searchAttemptFailed = false;
-    if (note != null) _setStatusNote(note);
-    _logLine('Trying ${server.name}…');
-
-    final f = _connectOnce(server);
-    unawaited(f.then((_) {}, onError: (_) {}));
-
-    final watch = Stopwatch()..start();
-    var lastNativePollMs = -1000;
-    while (watch.elapsed < deadline) {
-      if (!alive()) return false;
-      if (state == VpnState.connected &&
-          currentServer?.id == server.id) {
-        return true;
-      }
-      // Fail fast on a real error from this attempt (same grace
-      // rule as the old combination loop).
-      if ((_searchAttemptFailed || state == VpnState.error) &&
-          watch.elapsed > const Duration(milliseconds: 1500)) {
-        break;
-      }
-      // Poll the native ground truth alongside the status event:
-      // when the core is up but the event (or the raw flow's own
-      // slower wait) has not landed yet, confirm the session
-      // through the normal connected bookkeeping.
-      if (watch.elapsedMilliseconds - lastNativePollMs >= 1000) {
-        lastNativePollMs = watch.elapsedMilliseconds;
-        if (currentServer?.id == server.id &&
-            await _v2rayNativeConnected()) {
-          _markConnected();
-          if (state == VpnState.connected) return true;
-        }
-      }
-      await Future.delayed(const Duration(milliseconds: 250));
-    }
-    if (state == VpnState.connected && currentServer?.id == server.id) {
-      return true;
-    }
-    if (!alive()) return false;
-    final nativeState = await _v2rayNativeState();
-    _logLine(nativeState == null
-        ? '${server.name} did not connect.'
-        : '${server.name} did not connect '
-            '(engine state: ${nativeState.replaceFirst('V2RAY_', '').toLowerCase()}).');
-    await _disconnect(userIntent: false);
-    return false;
-  }
-
-  /// Manual stealth connect (2026-10-11 rework): ONE attempt on
-  /// the user's chosen server with the core's own DNS — no DNS
-  /// measurement, no provider escalation, no verification or
-  /// stability gate. The combination machinery that used to run
-  /// here never let a connection through on Shiv's device across
-  /// several fix rounds, so at his order it is disconnected from
-  /// the live path; its pure helpers remain in dns_combo.dart.
+  /// Tier 1 the user's selected provider, Tier 2 the other
+  /// answering providers in measured speed order (capped at 2 so
+  /// one connect stays inside a sane time budget), Tier 3 the
+  /// built-in default DNS treatment (see [manualEscalationAttempts]).
+  /// Every tier runs through [_attemptStealthCombo]: "Connected" is
+  /// declared only for a combination that passed end-to-end
+  /// verification AND the stability gate — a tunnel that carries no
+  /// traffic is never shown as connected.
+  ///
+  /// This replaces the 2026-10-11 unverified path (engine-up was
+  /// enough for "Connected"), which is what let dead servers show
+  /// as connected and left the user on a tunnel with no internet.
+  /// The verifier has since been hardened (concurrent checks, raced
+  /// exit-IP services, 10 s budget, a lenient Tier-3 gate), so the
+  /// verification that used to block every connect no longer does.
+  ///
+  /// AdShield fallback: when every tier fails with the AdShield
+  /// treatment on, the ladder retries the user's selected DNS and
+  /// then the default treatment with AdShield switched off for
+  /// those attempts — a session on plain DNS beats no session at
+  /// all, and the log + DNS note say so honestly.
   Future<void> _connectStealthSimple(VpnServer server) async {
     // Capture the operation session: if the user disconnects or
     // starts a different connect while this runs, the token moves
@@ -1431,21 +1455,82 @@ class VpnController extends ChangeNotifier {
     // because the user's action owns the state from then on.
     final session = ++_autoSession;
     _autoRunningSession = session;
+    // Hold the "Connected" claim behind the gates for the whole
+    // ladder: the engine's CONNECTED event only records the
+    // tunnel as up, and the public state flips only when a
+    // combination has passed verification + the stability gate.
+    _stealthGateHeld = true;
     bool alive() =>
         autoShouldContinue(session: session, currentSession: _autoSession);
     try {
       dnsFallbackNote = null;
       _setStatusNote('Connecting to ${server.name}…');
-      final connected = await _attemptStealthServer(
-        server: server,
-        alive: alive,
-        deadline: debugAttemptDeadline ?? _manualAttemptDeadline,
+      final selected = await DnsService.loadSelected();
+      if (!alive()) return;
+      final measured = await _measureProviders();
+      if (!alive()) return;
+      final ladder = manualEscalationAttempts(
+        selected: selected,
+        measured: measured,
+        maxTier2: 2,
       );
+      var connected = false;
+      DnsProvider? winningDns;
+      for (final dns in ladder) {
+        if (!alive()) return;
+        connected = await _attemptStealthCombo(
+          server: server,
+          dns: dns,
+          alive: alive,
+          deadline: debugAttemptDeadline ?? _manualAttemptDeadline,
+          heal: false,
+        );
+        if (!alive()) return;
+        if (connected) {
+          winningDns = dns;
+          break;
+        }
+      }
+      // AdShield fallback: the treatment itself may be what broke
+      // every tier (its counting DNS + AdGuard upstreams). One
+      // plain retry — selected DNS first, then the default
+      // treatment — with the treatment switched off.
+      if (!connected && _adShieldWanted && alive()) {
+        _logLine('AdShield blocking may be breaking this connect — '
+            'retrying with plain DNS.');
+        _adShieldFallback = true;
+        try {
+          for (final dns in [selected, DnsService.defaultDns]) {
+            if (!alive()) return;
+            connected = await _attemptStealthCombo(
+              server: server,
+              dns: dns,
+              alive: alive,
+              deadline: debugAttemptDeadline ?? _manualAttemptDeadline,
+              heal: false,
+            );
+            if (!alive()) return;
+            if (connected) {
+              winningDns = dns;
+              dnsFallbackNote = 'AdShield blocking is off for this '
+                  'session — its DNS broke the connect.';
+              break;
+            }
+          }
+        } finally {
+          _adShieldFallback = false;
+        }
+      }
       if (!alive()) return;
       _dnsOverride = null;
       _setStatusNote(null);
       if (connected) {
-        effectiveDns = DnsService.defaultDns;
+        // A fallback DNS won the search: say so honestly instead
+        // of silently showing a provider the user did not pick.
+        if (winningDns != null && winningDns.id != selected.id) {
+          dnsFallbackNote ??= 'Connected with ${winningDns.name} '
+              'because the selected DNS did not work with this server.';
+        }
         _logLine('Connected with ${server.name}.');
         try {
           final prefs = await SharedPreferences.getInstance();
@@ -1455,9 +1540,12 @@ class VpnController extends ChangeNotifier {
         }
         return;
       }
-      _fail('${server.name} could not connect. '
-          'Please try another server.');
+      _fail('${server.name} could not connect — no DNS combination '
+          'carried traffic. Please try another server.');
     } finally {
+      _adShieldFallback = false;
+      _stealthGateHeld = false;
+      _gatedTunnelUp = false;
       _dnsOverride = null;
       if (_autoRunningSession == session) _autoRunningSession = null;
     }
@@ -1847,21 +1935,21 @@ class VpnController extends ChangeNotifier {
   /// Stealth Auto: find the best (server, DNS) combination and
   /// connect with it — verified end to end.
   ///
-  /// The DNS providers are measured first (fast, parallel); the
-  /// candidate order is the user's selected provider first when it
-  /// answers, otherwise the fastest answering provider, then the
-  /// next fastest. Servers keep their incoming order (last-good
-  /// first, then health + latency). Combinations are built by
-  /// [buildDnsServerCombos] and capped at 6. Each attempt runs
-  /// through [_attemptStealthCombo] under the Connected gate: a
-  /// ~12 second connect deadline, a real verification through the
-  /// tunnel, and the stability gate — "connected" is declared only
-  /// for a combination that carried a DNS answer and a hostname
-  /// fetch and kept doing so across the gate's probes. If every
-  /// combination fails, one Tier-3 attempt on the best candidate
-  /// with the default DNS treatment runs before total failure is
-  /// declared. Failed combinations are torn down cleanly before
-  /// the next one is tried.
+  /// Each server is tried once with the user's selected DNS, in
+  /// incoming order (last-good first, then health + latency —
+  /// traffic-verified servers first). Every attempt runs through
+  /// [_attemptStealthCombo] under the Connected gate: a ~12 second
+  /// connect deadline, a real verification through the tunnel, and
+  /// the stability gate — "connected" is declared only for a
+  /// combination that carried a DNS answer and a hostname fetch
+  /// and kept doing so across the gate's probes. A server whose
+  /// tunnel comes up but carries no traffic is skipped, never
+  /// shown as connected. If every server fails, one Tier-3 attempt
+  /// on the best candidate with the default DNS treatment runs,
+  /// then — with AdShield on — one plain retry (AdShield off) on
+  /// the same candidate, before total failure is declared. Failed
+  /// combinations are torn down cleanly before the next one is
+  /// tried.
   Future<void> connectStealthAuto(List<VpnServer> candidates) async {
     if (candidates.isEmpty) {
       _fail('No stealth servers available yet. '
@@ -1879,14 +1967,15 @@ class VpnController extends ChangeNotifier {
     // connect, disconnect or state writes of its own.
     final session = ++_autoSession;
     _autoRunningSession = session;
+    // Hold the "Connected" claim behind the gates for the whole
+    // search (see [_connectStealthSimple]).
+    _stealthGateHeld = true;
     bool alive() =>
         autoShouldContinue(session: session, currentSession: _autoSession);
     // A fresh search starts a fresh attempt log. The presentation
     // is held for the whole run: one continuous Connecting state
     // while the servers are tried in the background (the internal
-    // per-attempt churn never surfaces). There is no DNS
-    // dimension any more (2026-10-11 rework): each server is
-    // tried once, with the core's own DNS.
+    // per-attempt churn never surfaces).
     _clearAttemptLog();
     _searchHeld = true;
     try {
@@ -1905,43 +1994,93 @@ class VpnController extends ChangeNotifier {
         ...candidates.where((s) => s.id != lastGoodId),
       ];
       final tried = ordered.length > 6 ? 6 : ordered.length;
+      final selected = await DnsService.loadSelected();
+      if (!alive()) return;
 
       dnsFallbackNote = null;
       _setStatusNote('Finding a working server…');
+      var connected = false;
       for (var i = 0; i < tried; i++) {
         if (!alive()) return;
         final server = ordered[i];
-        final connected = await _attemptStealthServer(
+        connected = await _attemptStealthCombo(
           server: server,
+          dns: selected,
           alive: alive,
           deadline: debugAttemptDeadline ?? _autoAttemptDeadline,
+          heal: false,
           note: 'Trying ${server.name} (${i + 1}/$tried)…',
         );
         if (!alive()) return;
+        if (connected) break;
+      }
+      // Tier 3 on the best candidate: the core's own DNS
+      // treatment, for a server the selected DNS could not carry.
+      if (!connected && alive()) {
+        connected = await _attemptStealthCombo(
+          server: ordered.first,
+          dns: DnsService.defaultDns,
+          alive: alive,
+          deadline: debugAttemptDeadline ?? _autoAttemptDeadline,
+          heal: false,
+          note: 'Trying ${ordered.first.name} with default DNS…',
+        );
         if (connected) {
-          effectiveDns = DnsService.defaultDns;
-          _logLine('Connected with ${server.name}.');
-          try {
-            final prefs = await SharedPreferences.getInstance();
-            await prefs.setString('stealth_last_good', server.id);
-          } catch (_) {
-            // Remembering the winner is best-effort only.
+          dnsFallbackNote = 'Connected with the default DNS because '
+              'the selected DNS did not work with this server.';
+        }
+      }
+      // AdShield fallback on the best candidate, same as the
+      // manual ladder: a plain-DNS session beats no session.
+      if (!connected && _adShieldWanted && alive()) {
+        _logLine('AdShield blocking may be breaking this search — '
+            'retrying with plain DNS.');
+        _adShieldFallback = true;
+        try {
+          for (final dns in [selected, DnsService.defaultDns]) {
+            if (!alive()) return;
+            connected = await _attemptStealthCombo(
+              server: ordered.first,
+              dns: dns,
+              alive: alive,
+              deadline: debugAttemptDeadline ?? _autoAttemptDeadline,
+              heal: false,
+              note: 'Trying ${ordered.first.name} with plain DNS…',
+            );
+            if (!alive()) return;
+            if (connected) {
+              dnsFallbackNote = 'AdShield blocking is off for this '
+                  'session — its DNS broke the search.';
+              break;
+            }
           }
-          _dnsOverride = null;
-          _setStatusNote(null);
-          return;
+        } finally {
+          _adShieldFallback = false;
         }
       }
 
       if (!alive()) return;
       _dnsOverride = null;
       _setStatusNote(null);
+      if (connected) {
+        _logLine('Connected with ${currentServer?.name ?? 'server'}.');
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final id = currentServer?.id;
+          if (id != null) await prefs.setString('stealth_last_good', id);
+        } catch (_) {
+          // Remembering the winner is best-effort only.
+        }
+        return;
+      }
       _searchHeld = false; // the final failure must land as an error
       _fail('No working server was found ($tried tried). '
           'This network may be blocking the available methods — '
           'try again later or pick a server manually.');
     } finally {
+      _adShieldFallback = false;
       _searchHeld = false;
+      _stealthGateHeld = false;
       _gatedTunnelUp = false;
       if (_autoRunningSession == session) _autoRunningSession = null;
     }

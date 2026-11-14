@@ -222,25 +222,35 @@ class SubscriptionStatus {
 /// attribution and selection priority: a link found in several feeds
 /// is credited to the earliest one, and when the per-tier quotas
 /// compete, earlier sources win the slots.
+/// - 0xRadikal top100 — a plain-text list of the operator's curated
+///   top 100 nodes, re-ranked every 15 minutes (the highest-quality
+///   feed, so it merges first).
 /// - sNSub best59 — a base64 subscription of nodes the operator
 ///   live-tests with Xray-core every few hours (pre-tested).
 /// - Au1rxx v2ray-base64 — a base64 subscription whose nodes the
 ///   operator publishes only after real HTTP traffic passed through
 ///   them (pre-tested).
-/// - Epodonios All_Configs_Sub.txt — plain-text list; the first source
-///   that carries VLESS+Reality links in bulk.
+/// - MahanKenway mix_sub — a base64 subscription, refreshed every
+///   2 hours.
+/// - 0xRadikal light — a base64 subscription, the light tier of the
+///   same curated collection as top100.
+/// - Epodonios All_Configs_Sub.txt — REMOVED 2026-11-07: the repo is
+///   gone (GitHub 404 on the repo and the file), so the feed can never
+///   return links. Barry-Far carries the same collection, so nothing
+///   is lost by dropping it.
+/// - Pawdroid Free-servers sub — REMOVED 2026-11-14: the repo pivoted
+///   to promoting its paid app and the `sub` file now holds only 9
+///   links (live-checked 2026-11-14).
 /// - Eternity.txt — plain-text list of share links.
 /// - sub_merge_base64.txt — a base64 subscription whose decoded body
 ///   is also a list of share links.
-/// - Pawdroid Free-servers sub — a base64 subscription (a plain-text
-///   body is also accepted, for robustness).
 /// - MatinGhanbari v2ray-configs — per-protocol base64 subscription
 ///   files (VLESS, Hysteria2, VMess, Trojan, Shadowsocks).
 /// - NoMoreWalls list_raw.txt — plain-text list from the largest
 ///   community aggregator (its base64 twin carries the same links).
 /// - Barry-Far All_Configs_Sub.txt — plain-text list; a large
-///   collection with heavy server-level overlap with Epodonios, so
-///   exact-link deduplication decides what is new.
+///   collection (it carried the same links the deleted Epodonios feed
+///   did), so exact-link deduplication decides what is new.
 ///
 /// Plus the private IPChakra feed (stealth.json in the IPChakra repo):
 /// links Shiv publishes there are validated like any other link, tagged
@@ -252,14 +262,16 @@ class SubscriptionStatus {
 /// ordered by stealth tier (Reality first) and the public feed is capped;
 /// user-imported and private servers are always kept and listed first.
 class V2RayService extends ChangeNotifier {
+  static const _top100Url =
+      'https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/top100.txt';
+  static const _mahanUrl =
+      'https://raw.githubusercontent.com/MahanKenway/Freedom-V2Ray/main/configs/mix_sub.txt';
+  static const _radikalLightUrl =
+      'https://raw.githubusercontent.com/0xRadikal/Free-v2ray-Configs/main/light/configs_base64.txt';
   static const _eternityUrl =
       'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity.txt';
   static const _subMergeUrl =
       'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge_base64.txt';
-  static const _epodoniosUrl =
-      'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt';
-  static const _pawdroidUrl =
-      'https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub';
   static const _snsubUrl =
       'https://raw.githubusercontent.com/3000S-HTTP/sNSub/main/output/best59_base64.txt';
   static const _au1rxxUrl =
@@ -280,12 +292,13 @@ class V2RayService extends ChangeNotifier {
   /// MatinGhanbari publishes one subscription file per protocol, so
   /// it contributes five URLs under one source.
   static const _feeds = <(String, List<String>, bool)>[
+    ('top100', [_top100Url], false),
     ('snsub', [_snsubUrl], true),
     ('au1rxx', [_au1rxxUrl], true),
-    ('epodonios', [_epodoniosUrl], false),
+    ('mahan', [_mahanUrl], true),
+    ('radikallight', [_radikalLightUrl], true),
     ('eternity', [_eternityUrl], false),
     ('submerge', [_subMergeUrl], true),
-    ('pawdroid', [_pawdroidUrl], true),
     (
       'matin',
       [
@@ -323,7 +336,20 @@ class V2RayService extends ChangeNotifier {
   /// attribution, and the pool cap grew to 600. A version 3 cache
   /// holds bare, unattributed links from the old four feeds only, so
   /// it is discarded once and refetched.
-  static const cacheSchemaVersion = 4;
+  /// Version 5: the Epodonios feed is gone (repo deleted, 2026-11-07
+  /// live check) — a version 4 cache still holds its dead links, so
+  /// it is discarded once and refetched without them.
+  /// Version 6: the Pawdroid feed is gone (9 links left, 2026-11-14
+  /// live check) and three new feeds joined (0xRadikal top100 +
+  /// light, MahanKenway mix_sub) — a version 5 cache holds the old
+  /// feed set, so it is discarded once and refetched.
+  static const cacheSchemaVersion = 6;
+
+  /// How long a fetched stealth list is trusted: free V2Ray nodes
+  /// churn within hours, so 4h (was 12h). The app re-checks this on
+  /// every open and every return to the foreground and refetches
+  /// when it expired — a stale cache is how dead servers pile up.
+  static const listTtl = Duration(hours: 4);
 
   /// Whether a stored cache schema matches the current one.
   static bool cacheSchemaMatches(int? stored) =>
@@ -364,6 +390,12 @@ class V2RayService extends ChangeNotifier {
 
   /// The last refresh outcome per subscription name.
   final Map<String, SubscriptionStatus> _subStatus = {};
+
+  /// The built-in stealth feed keys, in merge/priority order
+  /// (top100 first). Diagnostics and tests use this to prove a feed
+  /// is really wired in; the app itself iterates [_feeds].
+  static List<String> get feedSourceKeys =>
+      [for (final feed in _feeds) feed.$1];
 
   /// The status of one subscription, or an empty status when it
   /// has never been refreshed (or does not exist).
@@ -427,8 +459,8 @@ class V2RayService extends ChangeNotifier {
         await prefs.setInt(_kCacheSchema, cacheSchemaVersion);
       }
       final lastFetch = prefs.getInt(_kTime) ?? 0;
-      final stale =
-          DateTime.now().millisecondsSinceEpoch - lastFetch > 12 * 3600 * 1000;
+      final stale = DateTime.now().millisecondsSinceEpoch - lastFetch >
+          listTtl.inMilliseconds;
 
       // Cache-first: put the last-good list on screen immediately,
       // before any fetching. A refresh (above all the forced one on

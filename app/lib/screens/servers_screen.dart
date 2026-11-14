@@ -11,6 +11,7 @@ import '../services/openvpn_database.dart';
 import '../services/ovpn_mirror_service.dart';
 import '../services/server_database.dart';
 import '../services/share_service.dart';
+import '../services/speed_test_service.dart';
 import '../services/user_lists_service.dart';
 import '../services/v2ray_service.dart';
 import '../services/vpnbook_service.dart';
@@ -53,9 +54,9 @@ class ServersScreen extends StatefulWidget {
 class ServersScreenState extends State<ServersScreen> {
   String _query = '';
 
-  /// Active Stealth tier filter: 'All', 'Reality', 'Hysteria2',
-  /// 'TLS', 'Shadowsocks', 'Custom', 'Private', 'Favourites' or
-  /// 'Recent'.
+  /// Active Stealth tier filter: 'All', 'Working', 'Fastest',
+  /// 'Reality', 'Hysteria2', 'TLS', 'Shadowsocks', 'Custom',
+  /// 'Private', 'Favourites' or 'Recent'.
   String _stealthFilter = 'All';
 
   /// Active list filter on the Free tab: 'All', 'Favourites' or
@@ -65,6 +66,15 @@ class ServersScreenState extends State<ServersScreen> {
   /// Active list filter on the OpenVPN tab: 'All', 'Favourites' or
   /// 'Recent'.
   String _ovpnFilter = 'All';
+
+  /// Speed-test run state for the Fastest lists: while true the
+  /// "Test speed" button becomes Cancel and the progress line shows
+  /// which candidate is being measured.
+  bool _speedTesting = false;
+  bool _speedTestCancelled = false;
+  int _speedTestDone = 0;
+  int _speedTestTotal = 0;
+  String _speedTestName = '';
 
   Timer? _healthDebounce;
 
@@ -604,6 +614,33 @@ class ServersScreenState extends State<ServersScreen> {
         ],
       );
     }
+    if (_ovpnFilter == 'Fastest') {
+      // Flat fastest-first list, like Recent: only working servers,
+      // ordered by measured latency — the same ordering the country
+      // groups use inside, but without grouping, so the single
+      // fastest server in the whole database is the first row.
+      final fastest = sortByDownloadSpeed(
+        workingServers(all, widget.health),
+        widget.health,
+      );
+      return ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          chips,
+          _speedTestCard(
+            sortByHealthAndLatency(
+              workingServers(all, widget.health),
+              widget.health,
+            ),
+          ),
+          if (fastest.isEmpty)
+            _emptyFilterText('Fastest')
+          else
+            for (var i = 0; i < fastest.length; i++)
+              _FadeIn(index: i, child: _serverRow(fastest[i])),
+        ],
+      );
+    }
     final pool = switch (_ovpnFilter) {
       'Favourites' =>
         all.where((s) => widget.userLists.isFavourite(s.id)).toList(),
@@ -765,6 +802,12 @@ class ServersScreenState extends State<ServersScreen> {
     switch (_stealthFilter) {
       case 'Working':
         return workingServers(all, widget.health);
+      case 'Fastest':
+        // Same membership as 'Working' — only servers the health
+        // check has verified — but rendered as one flat list in
+        // measured-speed order (see _stealthList), not grouped by
+        // country, so the single fastest stealth server is row one.
+        return workingServers(all, widget.health);
       case 'Custom':
         return all.where((s) => s.source == 'custom').toList();
       case 'Private':
@@ -891,6 +934,7 @@ class ServersScreenState extends State<ServersScreen> {
     const filters = [
       'All',
       'Working',
+      'Fastest',
       'Reality',
       'Hysteria2',
       'TLS',
@@ -1219,20 +1263,37 @@ class ServersScreenState extends State<ServersScreen> {
           // Tier filters keep the shared fastest-first ordering;
           // Recent is shown in recency order instead. ('Working'
           // takes the grouped path below, like 'All' — Shiv wants
-          // the working set country-wise, fastest first.)
+          // the working set country-wise, fastest first — while
+          // 'Fastest' stays flat: working servers only, fastest
+          // first across the whole list, no country grouping.)
           final matching = _stealthFilter == 'Recent'
               ? _recentOrdered(_filteredStealth(v.servers))
-              : sortByHealthAndLatency(
-                  _filteredStealth(v.servers),
-                  widget.health,
-                );
+              : _stealthFilter == 'Fastest'
+                  // Download speed, not handshake latency: measured
+                  // Mbps first, advertised Mbps next, latency last.
+                  ? sortByDownloadSpeed(
+                      _filteredStealth(v.servers),
+                      widget.health,
+                    )
+                  : sortByHealthAndLatency(
+                      _filteredStealth(v.servers),
+                      widget.health,
+                    );
           return ListView(
             padding: const EdgeInsets.all(12),
             children: [
               ...header,
+              if (_stealthFilter == 'Fastest')
+                _speedTestCard(
+                  sortByHealthAndLatency(
+                    workingServers(v.servers, widget.health),
+                    widget.health,
+                  ),
+                ),
               if (matching.isEmpty)
                 (_stealthFilter == 'Favourites' ||
-                        _stealthFilter == 'Recent')
+                        _stealthFilter == 'Recent' ||
+                        _stealthFilter == 'Fastest')
                     ? _emptyFilterText(_stealthFilter)
                     : const Padding(
                         padding: EdgeInsets.all(24),
@@ -1289,9 +1350,11 @@ class ServersScreenState extends State<ServersScreen> {
   /// and OpenVPN tabs (the Stealth tab has its own chip row). The
   /// OpenVPN tab also gets 'Working' — the auto-collected set of
   /// servers the health checks have verified, country-grouped and
-  /// fastest-first like the full list (the Free tab's WARP entries
-  /// are anycast, always working, so the filter means nothing
-  /// there and is not offered).
+  /// fastest-first like the full list — and 'Fastest', the same
+  /// working set as one flat list, fastest first across all
+  /// countries (the Free tab's WARP entries are anycast, always
+  /// working, so the filters mean nothing there and are not
+  /// offered).
   Widget _listFilterChips({
     required String current,
     required ValueChanged<String> onChanged,
@@ -1308,6 +1371,7 @@ class ServersScreenState extends State<ServersScreen> {
             for (final f in [
               'All',
               if (includeWorking) 'Working',
+              if (includeWorking) 'Fastest',
               'Favourites',
               'Recent',
             ])
@@ -1348,6 +1412,10 @@ class ServersScreenState extends State<ServersScreen> {
         'No working servers found yet.\nHealth checks run automatically '
             'in the background — working servers will appear here as '
             'they are found.',
+      'Fastest' =>
+        'No working servers measured yet.\nHealth checks run automatically '
+            'in the background — the fastest servers will appear here, '
+            'fastest first, once they are measured.',
       _ =>
         'No recent connections yet.\nServers you connect to will appear here.',
     };
@@ -1450,6 +1518,113 @@ class ServersScreenState extends State<ServersScreen> {
     );
   }
 
+  /// "12.4 Mbps" under 10, "87 Mbps" above — the badge stays
+  /// readable at phone width either way.
+  static String _formatMbps(double mbps) =>
+      '${mbps < 10 ? mbps.toStringAsFixed(1) : mbps.toStringAsFixed(0)} Mbps';
+
+  /// "Test speed" card shown above a Fastest list: measures the
+  /// real download speed of the latency-fastest working servers
+  /// through their live tunnels and re-sorts the list by it.
+  /// [candidates] is the latency-fastest working list; the run
+  /// measures at most [ServerSpeedTest.maxServers] of them.
+  Widget _speedTestCard(List<VpnServer> candidates) {
+    final testable = candidates.take(ServerSpeedTest.maxServers).toList();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: ChakraTheme.card,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.speed, color: Colors.amber, size: 20),
+              SizedBox(width: 8),
+              Text(
+                'Download speed',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _speedTesting
+                ? 'Testing $_speedTestName '
+                    '($_speedTestDone/$_speedTestTotal)…'
+                : 'Latency says which server answers first — not how '
+                    'fast it downloads. Test the ${testable.length} '
+                    'fastest working servers for real download speed.',
+            style: const TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+          const SizedBox(height: 10),
+          _speedTesting
+              ? OutlinedButton(
+                  onPressed: () =>
+                      setState(() => _speedTestCancelled = true),
+                  child: const Text('Cancel'),
+                )
+              : ElevatedButton(
+                  onPressed: testable.isEmpty
+                      ? null
+                      : () => _runSpeedTest(testable),
+                  child: const Text('Test speed'),
+                ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _runSpeedTest(List<VpnServer> candidates) async {
+    if (_speedTesting) return;
+    setState(() {
+      _speedTesting = true;
+      _speedTestCancelled = false;
+      _speedTestDone = 0;
+      _speedTestTotal = candidates.length;
+      _speedTestName = '';
+    });
+    final test = ServerSpeedTest(
+      connector: VpnControllerConnector(widget.vpn),
+      health: widget.health,
+    );
+    await test.testCandidates(
+      candidates,
+      onProgress: (done, total, name) {
+        if (!mounted) return;
+        setState(() {
+          _speedTestDone = done;
+          _speedTestTotal = total;
+          _speedTestName = name;
+        });
+      },
+      isCancelled: () => _speedTestCancelled,
+    );
+    if (!mounted) return;
+    setState(() => _speedTesting = false);
+    final measured = candidates
+        .where((s) => widget.health.speedOf(s.id) != null)
+        .toList()
+      ..sort((a, b) => widget.health
+          .speedOf(b.id)!
+          .compareTo(widget.health.speedOf(a.id)!));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          measured.isEmpty
+              ? 'No server could be speed-tested — the list stays in '
+                  'latency order.'
+              : 'Fastest by download: ${measured.first.name} at '
+                  '${_formatMbps(widget.health.speedOf(measured.first.id)!)}',
+        ),
+      ),
+    );
+  }
+
   /// Server health badge: 🟢 working / 🔴 dead / ⚪ checking.
   Widget _healthBadge(VpnServer s) {
     return ListenableBuilder(
@@ -1474,12 +1649,17 @@ class ServersScreenState extends State<ServersScreen> {
           label = 'unchecked';
         } else if (w) {
           c = Colors.greenAccent;
-          label = 'working';
+          // Traffic-verified: this server carried real data through
+          // its live tunnel (a connect that passed end-to-end
+          // verification, or a real download) — not just a port
+          // that answered TCP. Ranked first in Working/Fastest.
+          label = widget.health.isVerified(s.id) ? 'working ✓' : 'working';
         } else {
           c = Colors.redAccent;
           label = 'dead';
         }
         final ms = widget.health.latencyOf(s.id);
+        final speed = widget.health.speedOf(s.id);
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1503,6 +1683,17 @@ class ServersScreenState extends State<ServersScreen> {
                 '• $ms ms',
                 style: const TextStyle(
                   color: Colors.white54,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+            if (speed != null) ...[
+              const SizedBox(width: 4),
+              Text(
+                '• ${_formatMbps(speed)}',
+                style: const TextStyle(
+                  color: ChakraTheme.cyan,
                   fontSize: 10,
                   fontWeight: FontWeight.w600,
                 ),

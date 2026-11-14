@@ -41,6 +41,18 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // R8 code + resource shrinking, same pattern as YouGlideTube
+            // (youglidetube-v2/app/build.gradle.kts): release only,
+            // debug builds stay unshrunk for fast iteration. Keep rules
+            // for the VPN plugins live in proguard-rules.pro — without
+            // them R8 would strip the JNI bridges and the tunnels
+            // would never connect.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }

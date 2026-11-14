@@ -111,16 +111,30 @@ List<DnsProvider> manualEscalationAttempts({
 /// What the gate still rejects is a tunnel that stops carrying
 /// traffic — a probe with no DNS answer or no exit fetch. When
 /// [verifiedExitIp] is unknown the exit requirement is skipped and
-/// the DNS answers alone decide. Pure function — unit-tested.
+/// the DNS answers alone decide.
+///
+/// [requireDns] is false only for the Tier-3 default-DNS attempt:
+/// the verification's fetch already proved the core's own DNS
+/// resolves hostnames, so each probe must still carry traffic —
+/// an exit fetch when the exit is known, else a DNS answer or a
+/// fetch — but a missing answer from the default resolver alone
+/// must not fail the gate.
 bool stabilityGatePassed({
   required List<({bool dnsOk, String? exitIp})> probes,
   required String? verifiedExitIp,
   required int requiredProbes,
+  bool requireDns = true,
 }) {
   if (probes.length < requiredProbes) return false;
   for (final probe in probes) {
-    if (!probe.dnsOk) return false;
-    if (verifiedExitIp != null && probe.exitIp == null) return false;
+    if (requireDns) {
+      if (!probe.dnsOk) return false;
+      if (verifiedExitIp != null && probe.exitIp == null) return false;
+    } else if (verifiedExitIp != null) {
+      if (probe.exitIp == null) return false;
+    } else if (!probe.dnsOk && probe.exitIp == null) {
+      return false;
+    }
   }
   return true;
 }

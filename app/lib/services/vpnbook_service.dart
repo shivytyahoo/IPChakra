@@ -56,8 +56,10 @@ class VpnBookService extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       final lastFetch = prefs.getInt(_kTime) ?? 0;
+      // 6h (was 12h): VPNBook rotates hosts/passwords, and the app
+      // re-checks this on every open/resume.
       final stale =
-          DateTime.now().millisecondsSinceEpoch - lastFetch > 12 * 3600 * 1000;
+          DateTime.now().millisecondsSinceEpoch - lastFetch > 6 * 3600 * 1000;
 
       List<String>? hosts;
       String? pass;

@@ -63,7 +63,17 @@ class _IPChakraAppState extends State<IPChakraApp>
     warp = WarpService();
     userLists = UserListsService();
     adShield = AdShieldService();
-    vpn = VpnController(warp, userLists: userLists, adShield: adShield);
+    vpn = VpnController(
+      warp,
+      userLists: userLists,
+      adShield: adShield,
+      // A stealth tunnel that proved it carries real traffic makes
+      // its server traffic-verified (ranked first in Working and
+      // Fastest); one that proved itself dead drops out of both
+      // lists at once instead of waiting for the next sweep.
+      onTrafficVerified: health.recordVerified,
+      onServerDead: health.recordDead,
+    );
     // The background health sweep: while the app is open, every
     // server gets checked on its own — the connect lists first,
     // the bulk OpenVPN pool last — so a connect never has to
@@ -125,10 +135,27 @@ class _IPChakraAppState extends State<IPChakraApp>
   /// notification, Settings or a quick-settings tile while the app
   /// was away must flip the UI to Disconnected, even if the stop
   /// event itself never reached the app.
+  /// Every open and every return to the foreground re-checks the
+  /// server lists: each service refetches only when its own TTL
+  /// expired (stealth 4h, OpenVPN sources 6h, servers.json 1h), so
+  /// a quick task-switch costs nothing but a list cached days ago
+  /// can never sit stale while the app stays in memory. The old
+  /// code only loaded lists at process boot (plus a manual refresh
+  /// or an upgrade), which is how dead servers piled up.
+  void _refreshListsIfStale() {
+    unawaited(db.load());
+    unawaited(vpngate.load());
+    unawaited(pool.load());
+    unawaited(vpnbook.load());
+    unawaited(mirror.load());
+    unawaited(v2ray.load());
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(vpn.reconcileNativeState());
+      _refreshListsIfStale();
       _sweeper.start();
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached ||

@@ -196,11 +196,11 @@ void main() {
     });
   });
 
-  group('cache schema v4', () {
-    test('version 3 caches are rejected, version 4 accepted', () {
-      expect(V2RayService.cacheSchemaVersion, 4);
-      expect(V2RayService.cacheSchemaMatches(3), isFalse);
-      expect(V2RayService.cacheSchemaMatches(4), isTrue);
+  group('cache schema v6', () {
+    test('version 5 caches are rejected, version 6 accepted', () {
+      expect(V2RayService.cacheSchemaVersion, 6);
+      expect(V2RayService.cacheSchemaMatches(5), isFalse);
+      expect(V2RayService.cacheSchemaMatches(6), isTrue);
       expect(V2RayService.cacheSchemaMatches(null), isFalse);
     });
   });

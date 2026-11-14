@@ -14,6 +14,14 @@ class VpnServer {
   final bool enabled;
   final int? pingMs;
 
+  /// Advertised download speed in Mbps, when the source publishes
+  /// one (VPNGate's Speed column — the server's own reported
+  /// throughput, NOT measured from this device). Null for every
+  /// other source. A measured speed (see HealthService.speedOf)
+  /// always outranks this: a claim from the feed's side loses to
+  /// a real download through the tunnel on the user's network.
+  final double? speedMbps;
+
   /// Runtime-only: VPNGate se aaya OpenVPN config text (servers.json me nahi).
   final String? ovpnConfig;
 
@@ -70,6 +78,7 @@ class VpnServer {
     this.note = '',
     this.enabled = true,
     this.pingMs,
+    this.speedMbps,
     this.ovpnConfig,
     this.shareLink,
     this.tier = '',
@@ -101,6 +110,7 @@ class VpnServer {
       note: note,
       enabled: enabled,
       pingMs: pingMs,
+      speedMbps: speedMbps,
       ovpnConfig: ovpnConfig,
       shareLink: shareLink,
       tier: tier,

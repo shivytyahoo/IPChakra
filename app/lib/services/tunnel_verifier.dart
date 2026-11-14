@@ -170,6 +170,72 @@ class TunnelVerifier {
       return InternetAddress.tryParse(body) != null ? body : null;
     });
   }
+
+  /// Plain-HTTP test files for the through-tunnel download speed
+  /// measurement: small, cache-free, served by CDNs built for speed
+  /// tests. Plain HTTP on purpose — the SOCKS path speaks raw TCP,
+  /// and a TLS handshake over it would need a second stack; the
+  /// file bytes are public test data, so no encryption is needed.
+  /// Hosts are tried in order; each gets its own [budget].
+  static const _speedFiles = [
+    ('cachefly.cachefly.net', '/5mb.test'),
+    ('speedtest.tele2.net', '/5MB.zip'),
+  ];
+
+  /// A test file is 5 MB; the cap leaves room for its HTTP headers.
+  static const _speedMaxBytes = 5500000;
+
+  /// Download a test file THROUGH the live stealth tunnel (SOCKS
+  /// inbound, the same path user traffic takes) and return the
+  /// measured download speed in Mbps, or null when it could not be
+  /// measured (tunnel down, file host unreachable, or the download
+  /// did not finish within [budget] — a server too slow to pull
+  /// 5 MB in time reports no speed instead of a misleading one).
+  /// The byte count is the response BODY only (headers excluded).
+  static Future<double?> downloadSpeedMbps({
+    Duration budget = const Duration(seconds: 30),
+  }) async {
+    for (final (host, path) in _speedFiles) {
+      final mbps = await _downloadSpeedFrom(host, path, budget);
+      if (mbps != null) return mbps;
+    }
+    return null;
+  }
+
+  static Future<double?> _downloadSpeedFrom(
+    String host,
+    String path,
+    Duration budget,
+  ) async {
+    final watch = Stopwatch()..start();
+    final bytes = await _viaSocks<int>(host, 80, (socket, reader) async {
+      socket.add(utf8.encode(
+        'GET $path HTTP/1.0\r\nHost: $host\r\nConnection: close\r\n\r\n',
+      ));
+      final raw = await reader.readToEnd(_speedMaxBytes, timeout: budget);
+      // Split headers from body: [CR LF CR LF].
+      var headerEnd = -1;
+      for (var i = 0; i + 3 < raw.length; i++) {
+        if (raw[i] == 13 &&
+            raw[i + 1] == 10 &&
+            raw[i + 2] == 13 &&
+            raw[i + 3] == 10) {
+          headerEnd = i + 4;
+          break;
+        }
+      }
+      if (headerEnd < 0) return 0;
+      final head = utf8.decode(raw.sublist(0, headerEnd),
+          allowMalformed: true);
+      if (!head.startsWith('HTTP/1.') || !head.contains(' 200 ')) return 0;
+      return raw.length - headerEnd;
+    });
+    watch.stop();
+    if (bytes == null || bytes <= 0) return null;
+    final secs = watch.elapsedMilliseconds / 1000;
+    if (secs <= 0) return null;
+    return bytes * 8 / secs / 1e6;
+  }
 }
 
 /// Minimal buffered reader over a [Socket]: SOCKS replies arrive in
