@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 
+import '../core/app_version.dart';
 import '../core/theme.dart';
 import '../services/dns_service.dart';
 import '../services/server_database.dart';
 import '../services/system_settings.dart';
+import '../services/update_service.dart';
 import '../services/vpn_controller.dart';
+import '../widgets/update_dialog.dart';
 
 /// Human "Last checked" formatting, e.g. "10 Oct 2026, 09:12",
 /// without pulling in a date-formatting package.
@@ -23,7 +26,16 @@ class SettingsScreen extends StatelessWidget {
   final ServerDatabase db;
   final VpnController vpn;
 
-  const SettingsScreen({super.key, required this.db, required this.vpn});
+  /// Test seam: the updater used by "Check for update". Defaults
+  /// to the real GitHub-backed service.
+  final UpdateService? updateService;
+
+  const SettingsScreen({
+    super.key,
+    required this.db,
+    required this.vpn,
+    this.updateService,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -194,6 +206,23 @@ class SettingsScreen extends StatelessWidget {
                     style: TextStyle(color: Colors.white54, fontSize: 12),
                   ),
                 ),
+                ListTile(
+                  leading: const Icon(
+                    Icons.system_update,
+                    color: ChakraTheme.cyan,
+                  ),
+                  title: const Text('Check for update'),
+                  subtitle: Text(
+                    'Current version $kAppVersionName — tap to check '
+                    'GitHub for a newer release.',
+                    style:
+                        const TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                  trailing: TextButton(
+                    onPressed: () => _checkForUpdate(context),
+                    child: const Text('Check'),
+                  ),
+                ),
               ]),
             ),
             const SizedBox(height: 24),
@@ -240,6 +269,53 @@ class SettingsScreen extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  /// Settings → Check for update: ask GitHub for the latest
+  /// release and show what it means. A newer release opens the
+  /// download dialog; up-to-date and failure both say so plainly
+  /// instead of leaving the user guessing.
+  Future<void> _checkForUpdate(BuildContext context) async {
+    final service = updateService ?? UpdateService();
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Text('Checking for updates…'),
+          ],
+        ),
+      ),
+    );
+    final result = await service.checkForUpdate();
+    if (!context.mounted) return;
+    Navigator.of(context).pop();
+    switch (result.status) {
+      case UpdateCheckStatus.upToDate:
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'You\'re up to date '
+              '(v${result.latestVersion ?? service.currentVersion}).',
+            ),
+          ),
+        );
+      case UpdateCheckStatus.error:
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result.message ?? 'Update check failed.'),
+          ),
+        );
+      case UpdateCheckStatus.available:
+        await showDialog<void>(
+          context: context,
+          builder: (_) =>
+              UpdateAvailableDialog(result: result, service: service),
+        );
+    }
   }
 
   Future<void> _refreshDb(BuildContext context) async {

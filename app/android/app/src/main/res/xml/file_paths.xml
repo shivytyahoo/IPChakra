@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths for the in-app updater: only the updates/
+     subfolder of the app cache, where downloaded release APKs land. -->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>

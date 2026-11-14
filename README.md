@@ -105,7 +105,7 @@ The server lists live in this repository and update **without an app update**:
 
 | Version | Date | Highlights |
 |---|---|---|
-| **1.0.0** | 2026-11-14 | **Fresh start.** Version reset to 1.0.0 with everything since v2.3.4 folded in. **Verified connect, honest lists:** a Stealth server that cannot carry real traffic never shows "Connected" — it is skipped and marked dead, while traffic-proven servers rank first with a `working ✓` badge. **Your DNS first:** every connect tries the DNS you picked in Settings before escalating. **AdShield fallback:** if the ad-blocking DNS itself breaks a connect, the app retries once with AdShield treatment off and says so. **No more stuck "Connecting…":** a late CONNECTING event can no longer knock a live session back. **Server refresh:** three new Stealth feeds (0xRadikal top100/light, MahanKenway mix_sub), Pawdroid feed removed, WARP 7th endpoint (188.114.99.1), servers.json v3, cache schema 6, auto-refresh on every foreground return, real 5 MB download speed tests, R8 release shrinking, and anti-detect surrogates for the embedded AdShield (fail-safe stub DNS server). |
+| **1.0.0** | 2026-11-14 | **Fresh start.** Version reset to 1.0.0 with everything since v2.3.4 folded in. **Verified connect, honest lists:** a Stealth server that cannot carry real traffic never shows "Connected" — it is skipped and marked dead, while traffic-proven servers rank first with a `working ✓` badge. **Your DNS first:** every connect tries the DNS you picked in Settings before escalating. **AdShield fallback:** if the ad-blocking DNS itself breaks a connect, the app retries once with AdShield treatment off and says so. **No more stuck "Connecting…":** a late CONNECTING event can no longer knock a live session back. **In-app update check:** Settings → Check for update asks GitHub for the latest release, downloads its APK into the app cache and opens the system installer — no second app, no manual download. **Server refresh:** three new Stealth feeds (0xRadikal top100/light, MahanKenway mix_sub), Pawdroid feed removed, WARP 7th endpoint (188.114.99.1), servers.json v3, cache schema 6, auto-refresh on every foreground return, real 5 MB download speed tests, R8 release shrinking, and anti-detect surrogates for the embedded AdShield (fail-safe stub DNS server). |
 | **2.3.4** | 2026-10-11 | **AdShield Embedded.** The AdShield ad-blocker now lives inside the app: one tap on the animated Home-screen switch blocks ads and trackers at the VPN session's DNS — no second app, no second VPN profile. V2Ray sessions get the full ~254,000-domain list (StevenBlack + HaGeZi Multi PRO + uBlock + curated ad-network lists, streaming EXTREME pack on) injected into the core's DNS; WireGuard/OpenVPN sessions switch to an ad-blocking DNS provider. The card shows the list size honestly — there is no fake per-query counter — and an animated connect button sweep while connecting. |
 | **2.3.3** | 2026-10-11 | **OpenVPN Mega-Database.** The OpenVPN list grows from ~290 to ≈5,128 entries — the VPNGate rolling pool (hourly bot pool of ~4,900 servers, fetched via a cheap change-index and parsed off the UI thread), a handshake-verified liveness overlay, and VPNBook in four protocol variants. Stealth country grouping restored (full ISO country detection; flags, codes, English and Chinese names). Switching modes no longer disconnects a live VPN — the engine hand-over happens only when you tap Connect in another mode. The WireGuard notification is now an ongoing foreground-service notification that cannot be swiped away while connected. |
 | 2.3.2 | 2026-10-11 | **Layout fix.** Server names render on one line again (a unified hand-built server tile replaces the ListTile rows whose trailing buttons starved the name of width), with rendered-geometry regression tests. |
@@ -122,6 +122,18 @@ The server lists live in this repository and update **without an app update**:
 | 2.0.1 | 2026-10-10 | First-tap disconnect fix, server health + latency sorting, **27-provider DNS selection** with speed test. |
 | 2.0.0 | 2026-10-10 | **Stealth mode launch** with full UI redesign (animated connect button, glass UI), VLESS/Trojan/VMess unlocked, Stealth Auto ladder, manual link import. |
 | 1.x | 2026-10-02 | Free Mode: WARP/WireGuard + OpenVPN, remote server database, Android phone + TV. |
+
+## Updating
+
+Settings → **Check for update** asks GitHub for the latest
+release and compares it with the running build. When a newer
+release carries an APK, the app downloads it into its cache and
+opens the system installer — Android asks once to allow
+"Install unknown apps" for IPChakra, then the update installs
+over the current one. A release with no APK offers its release
+page instead, and a failed check says so rather than claiming
+everything is up to date. The check is manual only; nothing
+polls GitHub in the background.
 
 ## Building from source
 

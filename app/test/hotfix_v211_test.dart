@@ -302,8 +302,8 @@ void main() {
     });
 
     test('the recorded build matches this release', () {
-      expect(kAppVersionName, '2.3.4');
-      expect(kAppBuildNumber, 16);
+      expect(kAppVersionName, '1.0.0');
+      expect(kAppBuildNumber, 1);
     });
   });
 }
